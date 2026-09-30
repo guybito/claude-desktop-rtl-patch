@@ -9,7 +9,10 @@
       3. Validates the assembled blob with `node --check`.
       4. Replaces the region between the CLAUDE RTL PATCH START/END markers inside
          patch.ps1's $RTL_INJECTION_CODE here-string.
-      5. Writes patch.ps1 back as UTF-8 (no BOM), LF line endings.
+      5. Checks src/asar-patch.cjs (ASCII only, `node --check`, no here-string
+         terminator) and splices it between the CLAUDE RTL ASAR HELPER START/END
+         markers inside patch.ps1's $ASAR_HELPER_CODE here-string.
+      6. Writes patch.ps1 back as UTF-8 (no BOM), LF line endings.
 
     After running this you MUST re-sign:  tools/sign-release.ps1
     then commit patch.ps1 + patch.ps1.sig together.
@@ -25,9 +28,10 @@ $ErrorActionPreference = 'Stop'
 $repoRoot   = Split-Path -Parent $PSScriptRoot
 $corePath   = Join-Path $repoRoot 'src\rtl-core.js'
 $payPath    = Join-Path $repoRoot 'src\rtl-payload.js'
+$helperPath = Join-Path $repoRoot 'src\asar-patch.cjs'
 $patchPath  = Join-Path $repoRoot 'patch.ps1'
 
-foreach ($p in @($corePath, $payPath, $patchPath)) {
+foreach ($p in @($corePath, $payPath, $helperPath, $patchPath)) {
     if (-not (Test-Path $p)) { Write-Host "Missing: $p" -ForegroundColor Red; exit 1 }
 }
 
@@ -71,6 +75,25 @@ if (-not [regex]::IsMatch($patch, $pattern)) {
 # Use a MatchEvaluator so '$' in the JS is not interpreted as a replacement token.
 $evaluator = [System.Text.RegularExpressions.MatchEvaluator] { param($m) $block }
 $updated = [regex]::Replace($patch, $pattern, $evaluator, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+# ASAR helper: embedded verbatim, so it must survive PowerShell 5.1 reading the
+# BOM-less patch.ps1 as ANSI (ASCII only) and must not end the here-string early.
+$helper = (Read-Lf $helperPath).TrimEnd("`n")
+if ($helper -match '[^\x00-\x7F]') {
+    Write-Host "src/asar-patch.cjs contains non-ASCII characters - aborting, patch.ps1 untouched." -ForegroundColor Red; exit 1
+}
+if ($helper -match "(?m)^'@") {
+    Write-Host "src/asar-patch.cjs has a line starting with '@ (here-string terminator) - aborting." -ForegroundColor Red; exit 1
+}
+& node --check $helperPath
+if (-not $?) { Write-Host "node --check failed on src/asar-patch.cjs - aborting, patch.ps1 untouched." -ForegroundColor Red; exit 1 }
+$helperBlock = "// --- CLAUDE RTL ASAR HELPER START ---`n" + $helper + "`n// --- CLAUDE RTL ASAR HELPER END ---"
+$helperPattern = '(?s)// --- CLAUDE RTL ASAR HELPER START ---.*?// --- CLAUDE RTL ASAR HELPER END ---'
+if (-not [regex]::IsMatch($updated, $helperPattern)) {
+    Write-Host "ASAR HELPER markers not found in patch.ps1" -ForegroundColor Red; exit 1
+}
+$helperEvaluator = [System.Text.RegularExpressions.MatchEvaluator] { param($m) $helperBlock }
+$updated = [regex]::Replace($updated, $helperPattern, $helperEvaluator, [System.Text.RegularExpressions.RegexOptions]::Singleline)
 
 # Sanity guard: never write a suspiciously small file (protects against any
 # upstream failure that could otherwise truncate patch.ps1).

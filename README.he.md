@@ -63,7 +63,7 @@ irm https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/in
 | דרישה | פירוט |
 | :--- | :--- |
 | **Windows 10 / 11** | עם Claude Desktop מותקן ([הורדה](https://downloads.claude.ai/releases/win32/ClaudeSetup.exe)) |
-| **Node.js** | `npx` צריך להיות זמין ב-PATH ([nodejs.org](https://nodejs.org/)), משמש לאריזה מחדש של ארכיון האפליקציה |
+| **Node.js** | גרסה 22.12 ומעלה ([nodejs.org](https://nodejs.org/)), משמשת לעריכה מקומית של ארכיון האפליקציה. `npx` נדרש רק למנגנון גיבוי נדיר |
 | **הרשאות מנהל** | המתקין מבקש אותן אוטומטית דרך UAC |
 
 **⚠️ חשוב:** Windows בלבד. ב-macOS השתמשו בפאצ' של [soguy](https://github.com/soguy/claude-desktop-rtl-mac) במקום. *(לא בדקתי את גרסת ה-Mac בעצמי, השימוש על אחריותכם.)*
@@ -143,7 +143,7 @@ irm https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/in
 
 ## 🛠️ פתרון תקלות
 
-**מופיע `Node.js (npx) is required`:** התקינו Node.js מ-[nodejs.org](https://nodejs.org/) ופתחו מחדש את PowerShell.
+**מופיע `Node.js is required` או `is too old`:** התקינו או עדכנו את Node.js (גרסה 22.12 ומעלה) מ-[nodejs.org](https://nodejs.org/) ופתחו מחדש את PowerShell.
 
 **אם Claude לא עולה אחרי ההחלה:** הריצו שוב את הסקריפט, בחרו **2 (Restore)** ואז **1 (Install)**.
 
@@ -163,7 +163,7 @@ irm https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main/in
 
 מכיוון ש-Claude Desktop היא אפליקציית Electron **חתומה דיגיטלית**, עריכה של קוד הממשק שלה שוברת את בדיקות השלמות. הפאצ' עוקף את זה בשלושה שלבים, כולם אטומיים ועם חזרה אוטומטית למצב הקודם בכל כשל:
 
-**שלב 1, הזרקת ASAR.** הממשק של Claude נמצא בתוך `app.asar`. הסקריפט מחלץ אותו עם `npx @electron/asar`, מוסיף לקבצי ה-renderer את ה-payload שמזהה RTL (וכופה את ממשק החלון ל-LTR בתהליך הראשי), אורז מחדש את הארכיון, ומחשב לכותרת שלו hash חדש של SHA-256. לוגיקת הזיהוי של ה-payload נמצאת ב-[`src/rtl-core.js`](src/rtl-core.js) (טהורה ונבדקת ביחידה) ו-[`src/rtl-payload.js`](src/rtl-payload.js) (שכבת ה-DOM); הסקריפט `tools/build-payload.ps1` מרכיב אותם לתוך `patch.ps1`.
+**שלב 1, הזרקת ASAR.** הממשק של Claude נמצא בתוך `app.asar`. כלי Node קטן שמוטמע בסקריפט ([`src/asar-patch.cjs`](src/asar-patch.cjs)) עורך את הארכיון ישירות, בלי לחלץ ולארוז מחדש: הוא מוסיף לקבצי ה-renderer את ה-payload שמזהה RTL (וכופה את ממשק החלון ל-LTR בתהליך הראשי), מעתיק את שאר הקבצים כמו שהם, משאיר את המודולים המקומפלים ב-`app.asar.unpacked` מחוץ לארכיון, ובודק את רשומות ה-SHA-256 של כל קובץ לפני העריכה ואחריה. אחר כך הסקריפט מחשב לכותרת hash חדש. לוגיקת הזיהוי של ה-payload נמצאת ב-[`src/rtl-core.js`](src/rtl-core.js) (טהורה ונבדקת ביחידה) ו-[`src/rtl-payload.js`](src/rtl-payload.js) (שכבת ה-DOM); הסקריפט `tools/build-payload.ps1` מרכיב אותם, יחד עם הכלי, לתוך `patch.ps1`.
 
 **שלב 2, החלפת ה-hash בתוך `claude.exe`.** ה-hash המקורי של ה-ASAR שמור כמחרוזת ASCII בתוך `claude.exe`. הסקריפט מבצע חיפוש-והחלפה ברמת הבייט כדי לעדכן אותו. אם הפורמט ישתנה אי-פעם, יש מנגנון גיבוי שמכבה את ה-Electron integrity fuse.
 

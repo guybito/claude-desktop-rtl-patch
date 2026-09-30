@@ -485,14 +485,37 @@
                     if (r.type === 1 && r.selectorText && r.style) {
                         var ff = r.style.getPropertyValue('font-family');
                         if (!ff || ff.indexOf(FAM) !== -1) continue;
-                        // A mono stack must stay mono even for Arabic glyphs inside
-                        // code; icon/math faces map codepoints privately.
-                        if (/mono|icon|katex|emoji|math/i.test(ff)) continue;
                         var bang = r.style.getPropertyPriority('font-family') ? ' !important' : '';
-                        css.push(prefix + r.selectorText + '{font-family:"' + FAM + '",' + ff + bang + '}' + suffix);
-                    } else if (r.cssRules && r.cssRules.length && typeof r.conditionText === 'string') {
-                        var at = (r.type === 12 ? '@supports ' : '@media ') + r.conditionText;
-                        scanRules(r.cssRules, prefix + at + '{', '}' + suffix);
+                        // A mono stack must stay mono even for Arabic glyphs inside
+                        // code; icon/math faces map codepoints privately; CSS-wide
+                        // keywords can't take a prefix. These are still re-declared
+                        // VERBATIM, in place: every font-family rule is copied in its
+                        // original order, so a prefixed copy of an earlier rule can't
+                        // overtake a later mono rule it used to lose to
+                        // (e.g. class="font-claude-response font-mono").
+                        var keep = /mono|icon|katex|emoji|math/i.test(ff) ||
+                            /^\s*(inherit|initial|unset|revert|revert-layer)\s*$/i.test(ff);
+                        css.push(prefix + r.selectorText + '{font-family:' + (keep ? '' : '"' + FAM + '",') + ff + bang + '}' + suffix);
+                    } else if (r.cssRules && r.cssRules.length) {
+                        // claude.ai (Tailwind v4) keeps nearly every font-family inside
+                        // @layer base/components/utilities. Re-entering the same named
+                        // layer keeps each copy in its original cascade layer; anonymous
+                        // layers can't be re-entered and are skipped.
+                        var at = '';
+                        if (typeof CSSLayerBlockRule !== 'undefined' && r instanceof CSSLayerBlockRule) {
+                            if (r.name) at = '@layer ' + r.name;
+                        } else if (typeof CSSScopeRule !== 'undefined' && r instanceof CSSScopeRule) {
+                            // A prelude-less @scope is bound to its <style>'s parent;
+                            // a copy in our sheet would widen it to the whole page.
+                            if (r.start) at = '@scope (' + r.start + ')' + (r.end ? ' to (' + r.end + ')' : '');
+                        } else if (typeof CSSContainerRule !== 'undefined' && r instanceof CSSContainerRule) {
+                            at = '@container ' + r.conditionText;
+                        } else if (r.type === 12) {
+                            at = '@supports ' + r.conditionText;
+                        } else if (r.type === 4) {
+                            at = '@media ' + r.conditionText;
+                        }
+                        if (at) scanRules(r.cssRules, prefix + at + '{', '}' + suffix);
                     }
                 }
             }
@@ -510,10 +533,13 @@
                 el = document.createElement('style');
                 el.id = 'claude-rtl-custom-font';
             }
-            // (Re-)append so the shadow sheet stays behind late-loaded chunk CSS.
-            if (el.textContent !== text || el.nextSibling) {
+            // (Re-)append so the shadow sheet stays behind late-loaded chunk CSS. It goes
+            // after <body>, not into <head>: claude.ai loads its CSS via <link>s inside
+            // <body>, which would otherwise follow us in document order and win ties.
+            var root = document.documentElement;
+            if (el.textContent !== text || el.parentNode !== root || el.nextSibling) {
                 el.textContent = text;
-                document.head.appendChild(el);
+                root.appendChild(el);
             }
         }
 

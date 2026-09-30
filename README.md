@@ -62,7 +62,7 @@ A UAC prompt will appear. Click **Yes** to grant administrator privileges, then 
 | Requirement | Notes |
 | :--- | :--- |
 | **Windows 10 / 11** | With Claude Desktop installed ([download](https://downloads.claude.ai/releases/win32/ClaudeSetup.exe)) |
-| **Node.js** | `npx` must be on your PATH ([nodejs.org](https://nodejs.org/)), used to repack the app archive |
+| **Node.js** | Node 22.12 or newer ([nodejs.org](https://nodejs.org/)), used to patch the app archive locally. `npx` is used only by a rare fallback |
 | **Administrator** | The installer elevates automatically via UAC |
 
 > [!IMPORTANT]
@@ -143,7 +143,7 @@ Run the script and choose **2. Restore Original State**. This restores all origi
 
 ## 🛠️ Troubleshooting
 
-**"Node.js (npx) is required":** Install Node.js from [nodejs.org](https://nodejs.org/) and reopen PowerShell.
+**"Node.js is required" / "Node … is too old":** Install or upgrade Node.js (22.12 or newer) from [nodejs.org](https://nodejs.org/) and reopen PowerShell.
 
 **Claude won't start after patching:** Run the script again, choose **2 (Restore)**, then **1 (Install)**.
 
@@ -161,7 +161,7 @@ Run the script and choose **2. Restore Original State**. This restores all origi
 
 Claude Desktop is a **digitally signed** Electron app, so editing its UI code breaks the integrity checks. The patch works around this in three phases, all atomic, with automatic rollback on failure:
 
-**Phase 1, ASAR injection.** Claude's UI lives inside `app.asar`. The script extracts it with `npx @electron/asar`, prepends the RTL-detection payload to the renderer files (and forces the window UI to LTR in the main process), repacks the archive, and computes its new SHA-256 header hash. The payload's detection logic lives in [`src/rtl-core.js`](src/rtl-core.js) (pure, unit-tested) plus [`src/rtl-payload.js`](src/rtl-payload.js) (DOM layer); `tools/build-payload.ps1` assembles them into `patch.ps1`.
+**Phase 1, ASAR injection.** Claude's UI lives inside `app.asar`. A small Node helper embedded in the script ([`src/asar-patch.cjs`](src/asar-patch.cjs)) edits the archive in place of an extract/repack round trip: it prepends the RTL-detection payload to the renderer files (and forces the window UI to LTR in the main process), copies every other file across unchanged, keeps native modules in `app.asar.unpacked` external, and verifies the per-file SHA-256 integrity records before and after. The script then computes the new header hash. The payload's detection logic lives in [`src/rtl-core.js`](src/rtl-core.js) (pure, unit-tested) plus [`src/rtl-payload.js`](src/rtl-payload.js) (DOM layer); `tools/build-payload.ps1` assembles them, together with the helper, into `patch.ps1`.
 
 **Phase 2, hash replacement in `claude.exe`.** The original ASAR hash is stored as an ASCII string inside `claude.exe`. The script does a byte-level search-and-replace to update it. If the format ever changes, it falls back to disabling the Electron integrity fuse.
 
