@@ -83,18 +83,39 @@ function rtlMajority(text) {
 }
 
 // Latin-first mixed rule: a line that opens with a Latin letter but also contains
-// RTL characters is treated as RTL (e.g. "Cloudflare" followed by Hebrew words).
-// Pure-Latin text is never affected.
-function latinFirstMixed(text) {
-    return firstStrong(text) === 'ltr' && hasRTL(text);
+// RTL text is treated as RTL (e.g. "Cloudflare" followed by Hebrew words), EXCEPT
+// an English sentence that merely quotes a single Hebrew word ("The word X means
+// hello"). Decision for a Latin-first line with RTL text:
+//   1. two or more RTL words                          -> RTL
+//   2. a Hebrew function word (shel, et, im, al...) or
+//      a Hebrew prefix glued to Latin (be-Cloudflare)  -> RTL
+//   3. a single RTL content word: RTL unless the Latin part carries English
+//      sentence grammar (the, is, means, of, to...)  -> then LTR.
+// Hebrew strings are \u-escaped: patch.ps1 must stay pure ASCII.
+var HE_FUNCTION_WORD_RE = new RegExp('(^|[^\\u0590-\\u05FF])(?:\u05E9\u05DC|\u05D0\u05EA|\u05E2\u05DD|\u05E2\u05DC|\u05D0\u05DC|\u05D0\u05D5|\u05D2\u05DD|\u05DB\u05D9|\u05D0\u05DD|\u05DC\u05D0|\u05D6\u05D4|\u05D6\u05D5|\u05D6\u05D0\u05EA|\u05D4\u05D5\u05D0|\u05D4\u05D9\u05D0|\u05D4\u05DD|\u05D4\u05DF|\u05D0\u05E0\u05D9|\u05D0\u05EA\u05D4|\u05D0\u05E0\u05D7\u05E0\u05D5|\u05D9\u05E9|\u05D0\u05D9\u05DF|\u05DB\u05DC|\u05E8\u05E7|\u05DB\u05DE\u05D5|\u05D0\u05D1\u05DC|\u05E2\u05D3|\u05D1\u05D9\u05DF|\u05DC\u05E4\u05D9|\u05D0\u05D7\u05E8\u05D9|\u05DC\u05E4\u05E0\u05D9|\u05DC\u05DC\u05D0|\u05D1\u05DC\u05D9|\u05DB\u05D3\u05D9|\u05DE\u05D5\u05DC|\u05D3\u05E8\u05DA|\u05D5\u05D0\u05D6|\u05D5\u05D2\u05DD|\u05DB\u05DA)(?=$|[^\\u0590-\\u05FF])');
+var HE_PREFIX_LATIN_RE = new RegExp('(^|[^\\u0590-\\u05FF])[\u05D1\u05D4\u05D5\u05DB\u05DC\u05DE\u05E9]{1,3}-?[A-Za-z0-9]');
+var EN_GRAMMAR_RE = /\b(?:the|a|an|is|are|was|were|be|been|means|mean|called|this|that|these|those|it|its|of|to|you|your|we|not|does|do|say|says|said|word|translate|translates)\b/i;
+
+function rtlWordCount(text) {
+    var toks = text.split(/\s+/), n = 0;
+    for (var i = 0; i < toks.length; i++) if (hasRTL(toks[i])) n++;
+    return n;
 }
 
-// Direction of a single line under the rule above: any RTL char => 'rtl', Latin
-// letters only => 'ltr', no strong chars => null.
+function latinFirstMixed(text) {
+    if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
+    if (rtlWordCount(text) >= 2) return true;
+    if (HE_FUNCTION_WORD_RE.test(text) || HE_PREFIX_LATIN_RE.test(text)) return true;
+    return !EN_GRAMMAR_RE.test(text);
+}
+
+// Direction of a single line under the rule above: 'rtl' | 'ltr' | null (no
+// strong chars).
 function lineDir(text) {
     var d = firstStrong(text);
     if (!d) return null;
-    return hasRTL(text) ? 'rtl' : 'ltr';
+    if (d === 'rtl') return 'rtl';
+    return latinFirstMixed(text) ? 'rtl' : 'ltr';
 }
 
 // True when a multi-line block holds at least one pure-Latin line. Only then is

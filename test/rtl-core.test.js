@@ -226,3 +226,20 @@ test('lineDir / hasPureLTRLine: per-line rule for multi-line blocks', () => {
     assert.ok(!core.hasPureLTRLine('Cloudflare חוסם\nשורה בעברית\n---'));
     assert.ok(core.hasPureLTRLine('Cloudflare חוסם\nnpm install foo'));
 });
+
+test('latinFirstMixed: single quoted Hebrew word inside an English sentence stays LTR', () => {
+    // case 9 from the examples: side effect avoided
+    assert.ok(!core.latinFirstMixed('The word שלום means hello'));
+    assert.ok(!core.latinFirstMixed('Please translate תודה to English'));
+    assert.ok(!core.latinFirstMixed('This is called שבת in Hebrew'));
+    // Hebrew-structured lines still flip
+    assert.ok(core.latinFirstMixed('Bot Management and Rate Limiting של Cloudflare'));
+    assert.ok(core.latinFirstMixed('3D Secure (3DS2) כחובה'));
+    assert.ok(core.latinFirstMixed('WAF rules של Cloudflare'));
+    assert.ok(core.latinFirstMixed('Cloudflare חוסם בוטים'));
+    assert.ok(core.latinFirstMixed('Rate Limiting per IP וסשן'));
+    assert.ok(core.latinFirstMixed('Cloudflare Turnstile בטופס'));
+    assert.ok(core.latinFirstMixed('Turnstile ב-Cloudflare'));
+    assert.ok(core.latinFirstMixed('The word שלום הוא ברכה'));
+    assert.strictEqual(core.lineDir('The word שלום means hello'), 'ltr');
+});
