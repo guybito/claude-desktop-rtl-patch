@@ -11,9 +11,9 @@
 #   6e:f4:c2:a6:c2:42:34:a1:5f:e5:cd:e5:5d:a5:b0:3c:94:64:b4:56:7f:81:04:7c:83:9a:50:1c:7c:6f:07:c9
 # Cross-check this at the project README and any out-of-band channel (e.g.
 # release notes, social) before trusting a fresh install.
-$ExpectedPubKey = 'eyJNb2R1bHVzIjoibkhzT3FXUUxVdjV3amVYc2RDVmYwQzNkTzdJd2U1S2lKTWJJS0poZkx3TGZWcE0vYzVMamZNc0lmbDVtZjk2UkVvaEdKdVZneVM2dGVGcXJINnpQNUE0Q3dLQ2s2Mk42Sy9lOXBNbGZSTDZpa281QmExOFRvckdQcjRpRVB4eGQ5NGVxL3dhUzNVRFBiNlZKaHU0MUFrdFQ2Z0pSTEdEenhRa011Rk1NSFc1SmgvMW5Bd3liNmk4bFdJZmZKS2lNUTgzZWI3OHBPVEIvdFpqUWU5RWZZdXg5aTJNK0psV1NuN3lheVRUNCtHM2xMNlJPRFI0V2pkZi91aE5jQ1NMN0NZdjFjVmViVW51WEtMc0dwaWdBOFVxc2piWkdIcEdXOEtVUXFhWGdDVFQ4NmIyZXl4aXVJc0theXE4NVQ4VkNrTGhtRnhqeE5PSGdFVmZPMmVFck9OV252OXZPMVNtb1YrK1VZUUNPTDVnbkE4cHFmVG1nTkIyU0pFOVIrOGtlWldIcVY1OCthOFBUWFlCZ1RHMlJMY2ZZVGZnUW0vTXVQdkg3UnlmVjlJMFJVeTJaaDZKTEsxT2xIT1kwc2Y2NW0wL0kwMXQzRjVmbmdnUTM0allJSWtzTThDRCtHZ2VnUWtmL2JVWHk0T2ZKYWdFK05UcndQNmJVVU9mT3N2dlVYY0ZDU3o0Y01qUWRzeTNnOE0wOWNWQmYzTzR1YzIrMEJ3TGZ3dXJjeFk1cWJJaHdmRmZWbkdSckt1UlBYdEZrd01pUEo4c3c4cGo0MU9WcEdKQVoxV2dpZnUvR2JqU1ovTXdMTk1PaThXbzBVZUg4ZFE2UFk2aUJiY1dqbUx1WHhCbjQ2R3Qwa0R1dEtCNEJCT0MrTHg2ajQ0M3ZWc2NTeFBrNVBvL0NKRlU9IiwiRXhwb25lbnQiOiJBUUFCIn0='
+$ExpectedPubKey = 'eyJNb2R1bHVzIjoieURqOEJOYTZVZlpiQlhJQ3p5dmFVQ2RIbFRId3VBRUMxZnJuOTNSS3pMZnhhVnM4QjI1S3lBVHhaNjc2RUVxM2Q1NFdIclhhY3g0VTN6NWdmcjlGM3E1MFJpeXVLL1c5YUhSWjMxdnk5WEdIMGNUczJCZFpvMExEUVFNbHJVWnVTVFZoRnNyV3hPQXN0WmVvbkpNUnNvZElWNjRibzVuZUhSN01yQmFKK2pqQVFMRktGdFBLUUVNUUd3TTR5OFRmbkFLcGxiTEluODNScThPM2VuaWVMc21nVEtDNzFOSWhMNkhkS1J2Q0Fpck9YMWRGWDQweDhKMEVTUnVzdytQQTJRdnlZTkYzNm54RU0wbStIa2Z5RGo1U0VLcVpZdWJ0TUxhOW40Mys3cktJQUJwVFZsMUpvN0UzQVFOQkd2MTZ6MDIzRThYTGhkZHdjOEZEOFYzZGRMeUVkMVpEd0FQZlRKRnVNWUIzMmZFVC9MQTgrL3U1V2NDREdPdTNLSzltdHVRRE9sSTN4NXJGODdFckdPOVBDSlZMV1NkQUtGc0RFMVBhenNkdmZTKzhkYXA5Sm5CRXRhUlVXOTExQUh3c3pETEFJNk9GdGdSUWt5cmNFSzBVM0FxOVdidHRaVWZXK2pEMXY3YlRldWJtMGJsa1pKWGpzT1BURUtRZllkYnRpUnppWFhHM0REMlpnbDluVVZBd2tGaTduNzNEakN3WDJhK2NNRFBZWFc1Rm1LRHpTUDR4c2tXSVp4bG5RSnMxUVRITmpkVHYzWmE4d1BFTFFlZGtIdFQrOUpFREJNaHp6aVIvdVBHS01Wa1VsYjhlN3BYa0ZpVEVZV1YwaVdPVzJRRnQvUEFJOVRXL0FEblBxdmN5MDJhWmhiNFB4ZGtFMjNiT0FLRElSMDA9IiwiRXhwb25lbnQiOiJBUUFCIn0='
 
-$RepoBase = 'https://raw.githubusercontent.com/shraga100/claude-desktop-rtl-patch/main'
+$RepoBase = 'https://raw.githubusercontent.com/guybito/claude-desktop-rtl-patch/main'
 $TmpFile  = Join-Path $env:TEMP 'claude_rtl_patch.ps1'
 
 # PS 5.1 defaults to TLS 1.0; GitHub requires 1.2+.
@@ -138,7 +138,7 @@ if (-not $valid) {
     Write-Host "  * or cloning the repo and running tools\verify-signature.ps1." -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Cross-check the public-key fingerprint at:" -ForegroundColor Cyan
-    Write-Host "  https://github.com/shraga100/claude-desktop-rtl-patch#verification" -ForegroundColor Cyan
+    Write-Host "  https://github.com/guybito/claude-desktop-rtl-patch#verification" -ForegroundColor Cyan
     return
 }
 
