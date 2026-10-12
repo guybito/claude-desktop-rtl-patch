@@ -66,6 +66,12 @@
         /*__RTL_CORE__*/
         // --- END PURE DETECTION CORE ---
 
+        // Latin-first mixed-line rule (menu option 7). patch.ps1 splices 'on' | 'off'
+        // over the placeholder at patch time; an unreplaced placeholder means ON.
+        var LATIN_FIRST = '__RTL_LATIN_FIRST__';
+        if (LATIN_FIRST.indexOf('__') === 0) LATIN_FIRST = 'on';
+        setLatinFirstEnabled(LATIN_FIRST !== 'off');
+
         // Text of an element excluding <code>/<pre> children.
         function textWithoutCode(el) {
             var out = '';
@@ -113,6 +119,7 @@
         // line by first-strong and render "Latin-first + Hebrew" lines LTR.
         function splitOrRtl(el) {
             if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
+            if (!isLatinFirstEnabled()) { splitToDirectionalSpans(el); return; }
             var t = el.innerText || el.textContent || '';
             if (hasPureLTRLine(t)) { splitToDirectionalSpans(el); return; }
             stampDir(el, 'rtl');

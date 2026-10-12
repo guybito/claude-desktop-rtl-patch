@@ -252,7 +252,14 @@ function rtlWordCount(text) {
     return n;
 }
 
+// User setting (patch menu, default ON). When off, latinFirstMixed never fires and
+// detection falls back to the original first-strong + majority layers.
+var LATIN_FIRST_ENABLED = true;
+function setLatinFirstEnabled(on) { LATIN_FIRST_ENABLED = !!on; }
+function isLatinFirstEnabled() { return LATIN_FIRST_ENABLED; }
+
 function latinFirstMixed(text) {
+    if (!LATIN_FIRST_ENABLED) return false;
     if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
     if (rtlWordCount(text) >= 2) return true;
     if (HE_FUNCTION_WORD_RE.test(text) || HE_PREFIX_LATIN_RE.test(text)) return true;
@@ -484,6 +491,12 @@ function majorityDir(dirs) {
 }
         // --- END PURE DETECTION CORE ---
 
+        // Latin-first mixed-line rule (menu option 7). patch.ps1 splices 'on' | 'off'
+        // over the placeholder at patch time; an unreplaced placeholder means ON.
+        var LATIN_FIRST = '__RTL_LATIN_FIRST__';
+        if (LATIN_FIRST.indexOf('__') === 0) LATIN_FIRST = 'on';
+        setLatinFirstEnabled(LATIN_FIRST !== 'off');
+
         // Text of an element excluding <code>/<pre> children.
         function textWithoutCode(el) {
             var out = '';
@@ -531,6 +544,7 @@ function majorityDir(dirs) {
         // line by first-strong and render "Latin-first + Hebrew" lines LTR.
         function splitOrRtl(el) {
             if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
+            if (!isLatinFirstEnabled()) { splitToDirectionalSpans(el); return; }
             var t = el.innerText || el.textContent || '';
             if (hasPureLTRLine(t)) { splitToDirectionalSpans(el); return; }
             stampDir(el, 'rtl');
@@ -1659,6 +1673,55 @@ function Resolve-CustomFont {
         }
     }
     return @{ Name = $name; Scope = $scope }
+}
+
+# -----------------------------------------------------------------------------
+# LATIN-FIRST MIXED LINES (default ON)
+# A line that opens with an English word but contains Hebrew renders RTL. Stored
+# in the protected state dir, so the choice survives auto re-patches after Claude
+# updates. Missing or unreadable file = ON.
+# -----------------------------------------------------------------------------
+$script:LatinFirstFile = Join-Path $global:RtlStateDir 'latin-first.txt'
+
+function Get-LatinFirstSetting {
+    if (Test-Path $script:LatinFirstFile) {
+        try {
+            $v = ([System.IO.File]::ReadAllText($script:LatinFirstFile)).Trim()
+            if ($v -ieq 'off') { return 'off' }
+        } catch { }
+    }
+    return 'on'
+}
+
+function Save-LatinFirstSetting([string]$value) {
+    if ($value -ne 'on' -and $value -ne 'off') { throw "Invalid value '$value' (expected on/off)." }
+    if (-not (Test-Path $global:RtlStateDir)) { New-Item -ItemType Directory -Path $global:RtlStateDir -Force | Out-Null }
+    Remove-PlantedFile $script:LatinFirstFile
+    [System.IO.File]::WriteAllText($script:LatinFirstFile, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Set-LatinFirstMenu {
+    Write-Host "`n--- English-first mixed lines ---" -ForegroundColor Cyan
+    $cur = Get-LatinFirstSetting
+    if ($cur -eq 'on') { Write-Host "Current: ON (default)" -ForegroundColor Green }
+    else { Write-Host "Current: OFF" -ForegroundColor DarkGray }
+    Write-Host ""
+    Write-Host "When ON, a line that starts with an English word but also contains Hebrew"
+    Write-Host "is shown right-to-left (e.g. 'WAF rules' followed by Hebrew words)."
+    Write-Host "An English sentence that only quotes one Hebrew word stays left-to-right."
+    Write-Host "When OFF, the original detection (first letter + majority) is used."
+    Write-Host ""
+    $answer = Read-Host "1 = ON, 2 = OFF, Enter = cancel"
+    if ($answer -eq '1') { $new = 'on' }
+    elseif ($answer -eq '2') { $new = 'off' }
+    else { Write-Host "No change."; return }
+    if ($new -eq $cur) { Write-Host "Already $($new.ToUpper())."; return }
+    try { Save-LatinFirstSetting $new } catch { Write-Warn "Could not save the setting: $($_.Exception.Message)"; return }
+    Write-Success "English-first mixed lines: $($new.ToUpper()) (kept across Claude updates)."
+    $apply = Read-Host "Apply the patch now? This closes Claude Desktop (Y/n)"
+    if ($apply -ne 'n' -and $apply -ne 'N') {
+        try { Install-Patch } catch { Write-Host $_.Exception.Message -ForegroundColor Red }
+    }
 }
 
 # Interactive menu flow for the same setting (no flag or env var needed): shows the
@@ -3309,7 +3372,9 @@ function Install-PatchCore {
         if ($FontCfg.Name) {
             Write-Success "Custom font enabled: '$($FontCfg.Name)' for $($script:CustomFontScopeDesc[$FontCfg.Scope]) (must be installed on this machine; disable with -CustomFont none)"
         }
-        $RendererInjection = $RTL_INJECTION_CODE.Replace('__RTL_CUSTOM_FONT__', $FontCfg.Name).Replace('__RTL_CUSTOM_FONT_SCOPE__', $FontCfg.Scope)
+        $LatinFirst = Get-LatinFirstSetting
+        Write-Log "English-first mixed lines: $($LatinFirst.ToUpper()) (menu option 7)"
+        $RendererInjection = $RTL_INJECTION_CODE.Replace('__RTL_CUSTOM_FONT__', $FontCfg.Name).Replace('__RTL_CUSTOM_FONT_SCOPE__', $FontCfg.Scope).Replace('__RTL_LATIN_FIRST__', $LatinFirst)
 
         # Direct edit, no extraction: the helper streams every untouched entry across,
         # injects the renderer payload / main-process switch, keeps unpacked native
@@ -3839,9 +3904,10 @@ function Show-Menu {
     Write-Host ""
     Write-Host "  Extras" -ForegroundColor DarkCyan
     Write-Host "    6. Set a Custom Text Font (All / Hebrew / Arabic-Persian)" -ForegroundColor White
-    Write-Host "    7. Exit" -ForegroundColor DarkGray
+    Write-Host "    7. English-first Mixed Lines as RTL [$((Get-LatinFirstSetting).ToUpper())]" -ForegroundColor White
+    Write-Host "    8. Exit" -ForegroundColor DarkGray
 
-    $choice = Read-Host "`nEnter your choice (1-7)"
+    $choice = Read-Host "`nEnter your choice (1-8)"
 
     if ($choice -eq '1' -or $choice -eq '2') {
         Write-Host "`nWARNING: This will automatically close Claude Desktop and its background services." -ForegroundColor Yellow
@@ -3888,7 +3954,13 @@ function Show-Menu {
         $null = Read-Host
         Show-Menu
     }
-    elseif ($choice -eq '7') { Exit }
+    elseif ($choice -eq '7') {
+        try { Set-LatinFirstMenu } catch { Write-Host $_.Exception.Message -ForegroundColor Red }
+        Write-Host "`nPress Enter to return to menu..."
+        $null = Read-Host
+        Show-Menu
+    }
+    elseif ($choice -eq '8') { Exit }
     else { Show-Menu }
 }
 

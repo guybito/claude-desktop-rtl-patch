@@ -135,6 +135,16 @@ Prefer reading in a different typeface? The patch can render Claude's text in an
 
 ---
 
+## ↔️ English-first mixed lines (on by default)
+
+A line that opens with an English word but contains Hebrew (`WAF rules` followed by Hebrew words, `3D Secure` followed by one Hebrew word) is shown right-to-left, including list items, the input box and multi-line blocks whose lines all contain Hebrew. An English sentence that merely quotes a single Hebrew word (`The word ... means hello`) stays left-to-right.
+
+- **Toggle:** menu option 7 (ON / OFF), then re-apply when prompted.
+- **Persistent:** saved in `ProgramData\ClaudeRtlPatch\latin-first.txt`, kept across auto re-patches.
+- **OFF** restores the original detection (first strong letter + majority script).
+
+---
+
 ## 🗑️ Uninstall
 
 Run the script and choose **2. Restore Original State**. This restores all original files from backup and removes the self-signed certificate from your Windows certificate store. If you enabled the auto-updater, choose **5. Disable Auto Re-Patch** as well.

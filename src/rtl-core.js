@@ -102,7 +102,14 @@ function rtlWordCount(text) {
     return n;
 }
 
+// User setting (patch menu, default ON). When off, latinFirstMixed never fires and
+// detection falls back to the original first-strong + majority layers.
+var LATIN_FIRST_ENABLED = true;
+function setLatinFirstEnabled(on) { LATIN_FIRST_ENABLED = !!on; }
+function isLatinFirstEnabled() { return LATIN_FIRST_ENABLED; }
+
 function latinFirstMixed(text) {
+    if (!LATIN_FIRST_ENABLED) return false;
     if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
     if (rtlWordCount(text) >= 2) return true;
     if (HE_FUNCTION_WORD_RE.test(text) || HE_PREFIX_LATIN_RE.test(text)) return true;
@@ -341,6 +348,8 @@ if (typeof module !== 'undefined' && module.exports) {
         firstStrong: firstStrong,
         rtlMajority: rtlMajority,
         latinFirstMixed: latinFirstMixed,
+        setLatinFirstEnabled: setLatinFirstEnabled,
+        isLatinFirstEnabled: isLatinFirstEnabled,
         lineDir: lineDir,
         hasPureLTRLine: hasPureLTRLine,
         stripLeadingLTR: stripLeadingLTR,

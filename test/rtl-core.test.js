@@ -243,3 +243,13 @@ test('latinFirstMixed: single quoted Hebrew word inside an English sentence stay
     assert.ok(core.latinFirstMixed('The word שלום הוא ברכה'));
     assert.strictEqual(core.lineDir('The word שלום means hello'), 'ltr');
 });
+
+test('setLatinFirstEnabled: setting OFF restores the original behaviour', () => {
+    try {
+        core.setLatinFirstEnabled(false);
+        assert.ok(!core.latinFirstMixed('WAF rules של Cloudflare'));
+        assert.ok(!core.latinFirstMixed('3D Secure (3DS2) כחובה'));
+        core.setLatinFirstEnabled(true);
+        assert.ok(core.latinFirstMixed('WAF rules של Cloudflare'));
+    } finally { core.setLatinFirstEnabled(true); }
+});
