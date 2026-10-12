@@ -428,7 +428,8 @@
         }
 
         // Inline runs (bold, links, spans) inside an RTL block that resolve LTR on
-        // their own -- e.g. a native dir="auto" or a stale ltr stamp on <strong> whose
+        // their own -- e.g. claude.ai's unicode-bidi:plaintext, a native dir="auto"
+        // or a stale ltr stamp on <strong> whose
         // text opens with a Latin word ("CAPTCHA" + Hebrew). The block is RTL but the
         // run renders as an LTR island, so its Hebrew words appear before the Latin
         // one. Flip such runs to RTL when the Latin-first rule says so. Code, math
@@ -444,8 +445,14 @@
                 if (el.querySelector('p, div, ul, ol, li, table, pre')) return;
                 var parent = el.parentElement;
                 if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
-                if (getComputedStyle(el).direction !== 'ltr') return;
-                if (detectTextDir(text) === 'rtl') stampDir(el, 'rtl');
+                // An LTR resolve comes either from direction:ltr or from the app's own
+                // unicode-bidi:plaintext on inline runs (first strong char wins, dir is
+                // ignored). Override both, the latter with !important.
+                var cs = getComputedStyle(el);
+                if (cs.direction !== 'ltr' && cs.unicodeBidi !== 'plaintext') return;
+                if (detectTextDir(text) !== 'rtl') return;
+                stampDir(el, 'rtl');
+                el.style.setProperty('unicode-bidi', 'isolate', 'important');
             });
         }
 
