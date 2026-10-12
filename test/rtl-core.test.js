@@ -210,3 +210,19 @@ test('segmentText still returns single segment for currency-only text (regressio
     assert.strictEqual(segs.length, 1);
     assert.strictEqual(segs[0].type, 'text');
 });
+
+test('latinFirstMixed: Latin-first line containing Hebrew is RTL', () => {
+    assert.ok(core.latinFirstMixed('Cloudflare חוסם בוטים'));
+    assert.ok(core.latinFirstMixed('Bot Management and WAF rules של Cloudflare'));
+    assert.ok(!core.latinFirstMixed('plain english only'));
+    assert.ok(!core.latinFirstMixed('שלום world'));
+    assert.ok(!core.latinFirstMixed(''));
+});
+
+test('lineDir / hasPureLTRLine: per-line rule for multi-line blocks', () => {
+    assert.strictEqual(core.lineDir('Cloudflare חוסם'), 'rtl');
+    assert.strictEqual(core.lineDir('only english'), 'ltr');
+    assert.strictEqual(core.lineDir('123 !!!'), null);
+    assert.ok(!core.hasPureLTRLine('Cloudflare חוסם\nשורה בעברית\n---'));
+    assert.ok(core.hasPureLTRLine('Cloudflare חוסם\nnpm install foo'));
+});

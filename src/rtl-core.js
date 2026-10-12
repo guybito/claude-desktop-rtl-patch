@@ -82,6 +82,33 @@ function rtlMajority(text) {
     return r > l;
 }
 
+// Latin-first mixed rule: a line that opens with a Latin letter but also contains
+// RTL characters is treated as RTL (e.g. "Cloudflare" followed by Hebrew words).
+// Pure-Latin text is never affected.
+function latinFirstMixed(text) {
+    return firstStrong(text) === 'ltr' && hasRTL(text);
+}
+
+// Direction of a single line under the rule above: any RTL char => 'rtl', Latin
+// letters only => 'ltr', no strong chars => null.
+function lineDir(text) {
+    var d = firstStrong(text);
+    if (!d) return null;
+    return hasRTL(text) ? 'rtl' : 'ltr';
+}
+
+// True when a multi-line block holds at least one pure-Latin line. Only then is
+// per-line auto direction (unicode-bidi:plaintext) needed; otherwise the whole
+// block can simply be RTL.
+function hasPureLTRLine(text) {
+    if (!text) return false;
+    var lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+        if (lineDir(lines[i]) === 'ltr') return true;
+    }
+    return false;
+}
+
 // Remove leading LTR-only noise (filenames, URLs, paths, backtick-code) so a Hebrew
 // sentence that starts with "foo.js" still detects as RTL.
 function stripLeadingLTR(text) {
@@ -292,6 +319,9 @@ if (typeof module !== 'undefined' && module.exports) {
         hasRTL: hasRTL,
         firstStrong: firstStrong,
         rtlMajority: rtlMajority,
+        latinFirstMixed: latinFirstMixed,
+        lineDir: lineDir,
+        hasPureLTRLine: hasPureLTRLine,
         stripLeadingLTR: stripLeadingLTR,
         LATEX_SIGNAL: LATEX_SIGNAL,
         hasLatexSignal: hasLatexSignal,

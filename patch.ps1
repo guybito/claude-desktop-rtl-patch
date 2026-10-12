@@ -232,6 +232,33 @@ function rtlMajority(text) {
     return r > l;
 }
 
+// Latin-first mixed rule: a line that opens with a Latin letter but also contains
+// RTL characters is treated as RTL (e.g. "Cloudflare" followed by Hebrew words).
+// Pure-Latin text is never affected.
+function latinFirstMixed(text) {
+    return firstStrong(text) === 'ltr' && hasRTL(text);
+}
+
+// Direction of a single line under the rule above: any RTL char => 'rtl', Latin
+// letters only => 'ltr', no strong chars => null.
+function lineDir(text) {
+    var d = firstStrong(text);
+    if (!d) return null;
+    return hasRTL(text) ? 'rtl' : 'ltr';
+}
+
+// True when a multi-line block holds at least one pure-Latin line. Only then is
+// per-line auto direction (unicode-bidi:plaintext) needed; otherwise the whole
+// block can simply be RTL.
+function hasPureLTRLine(text) {
+    if (!text) return false;
+    var lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+        if (lineDir(lines[i]) === 'ltr') return true;
+    }
+    return false;
+}
+
 // Remove leading LTR-only noise (filenames, URLs, paths, backtick-code) so a Hebrew
 // sentence that starts with "foo.js" still detects as RTL.
 function stripLeadingLTR(text) {
@@ -478,6 +505,16 @@ function majorityDir(dirs) {
             el.style.unicodeBidi = 'plaintext';
         }
 
+        // Multi-script block: if every line is RTL under the Latin-first mixed rule
+        // (no pure-Latin line), make the whole block RTL. plaintext would judge each
+        // line by first-strong and render "Latin-first + Hebrew" lines LTR.
+        function splitOrRtl(el) {
+            if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
+            var t = el.innerText || el.textContent || '';
+            if (hasPureLTRLine(t)) { splitToDirectionalSpans(el); return; }
+            stampDir(el, 'rtl');
+        }
+
         // If RTL is inherited via a parent CSS class (not an explicit dir on the element),
         // removing dir alone won't free it -- pin direction=ltr. Never touches a native dir.
         function resetDirOrPinLTR(el) {
@@ -507,8 +544,8 @@ function majorityDir(dirs) {
             if (d === 'rtl') return 'rtl';
 
             // Layer 3: RTL chars exist but first-strong still says LTR after stripping --
-            // majority script decides.
-            return rtlMajority(noCode) ? 'rtl' : null;
+            // majority script decides, or the Latin-first mixed rule applies.
+            return (rtlMajority(noCode) || latinFirstMixed(noCode)) ? 'rtl' : null;
         }
 
         // Majority first-strong over a list's items: confident enough to overrule a native
@@ -521,6 +558,7 @@ function majorityDir(dirs) {
                 var t = textWithoutCode(li);
                 var d = firstStrong(t);
                 if (d !== 'rtl') d = firstStrong(stripLeadingLTR(t)) || d;
+                if (d !== 'rtl' && latinFirstMixed(t)) d = 'rtl';
                 dirs.push(d || null);
             }
             return majorityDir(dirs);
@@ -537,7 +575,7 @@ function majorityDir(dirs) {
             d = firstStrong(stripped);
             if (d === 'rtl') return 'rtl';
 
-            return rtlMajority(text) ? 'rtl' : 'ltr';
+            return (rtlMajority(text) || latinFirstMixed(text)) ? 'rtl' : 'ltr';
         }
 
         // --- ELEMENT PROCESSING ---
@@ -679,7 +717,7 @@ function majorityDir(dirs) {
                     // for either native dir: native gives the whole block one dir, so a
                     // Hebrew quote whose first line is a Latin marker renders backwards.
                     if (hasRTL(el.textContent || '') && hasMultiScriptLines(el)) {
-                        splitToDirectionalSpans(el);
+                        splitOrRtl(el);
                     } else if (el.getAttribute('dir') !== 'rtl' &&
                                detectElDir(el) === 'rtl') {
                         // Disagreement (code-prefixed or Latin-first Hebrew): override.
@@ -693,7 +731,7 @@ function majorityDir(dirs) {
                 var dir = detectElDir(el);
                 if (dir) {
                     if (dir === 'rtl' && hasMultiScriptLines(el)) {
-                        splitToDirectionalSpans(el);
+                        splitOrRtl(el);
                         return;
                     }
                     stampDir(el, dir);
@@ -755,7 +793,7 @@ function majorityDir(dirs) {
                 if (text.length < 2) return;
                 if (hasRTL(text)) {
                     if (hasMultiScriptLines(el)) {
-                        splitToDirectionalSpans(el);
+                        splitOrRtl(el);
                     } else {
                         stampDir(el, detectTextDir(text) || 'rtl');
                         el.style.textAlign = 'start';
