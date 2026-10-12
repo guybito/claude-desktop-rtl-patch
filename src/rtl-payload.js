@@ -427,10 +427,33 @@
             });
         }
 
+        // Inline runs (bold, links, spans) inside an RTL block that resolve LTR on
+        // their own -- e.g. a native dir="auto" or a stale ltr stamp on <strong> whose
+        // text opens with a Latin word ("CAPTCHA" + Hebrew). The block is RTL but the
+        // run renders as an LTR island, so its Hebrew words appear before the Latin
+        // one. Flip such runs to RTL when the Latin-first rule says so. Code, math
+        // islands and editors are never touched. Part of the Latin-first setting.
+        var INLINE_SEL = 'strong, b, em, i, u, s, mark, a, span';
+        function processInlines(root) {
+            if (!isLatinFirstEnabled()) return;
+            qsa(root, INLINE_SEL).forEach(function(el) {
+                var text = (el.textContent || '').trim();
+                if (text.length < 2 || !hasRTL(text) || firstStrong(text) !== 'ltr') return;
+                if (el.closest(EDITOR_SEL) || el.closest('pre, code, kbd, samp, .katex, mjx-container')) return;
+                if (el.hasAttribute(ISLAND_FLAG) || el.hasAttribute(RTL_SPLIT_FLAG)) return;
+                if (el.querySelector('p, div, ul, ol, li, table, pre')) return;
+                var parent = el.parentElement;
+                if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
+                if (getComputedStyle(el).direction !== 'ltr') return;
+                if (detectTextDir(text) === 'rtl') stampDir(el, 'rtl');
+            });
+        }
+
         function processAll() {
             isolateMath(document.body);
             processText(document);
             processContainers(document.body);
+            processInlines(document.body);
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
@@ -658,6 +681,7 @@
                             isolateMath(r);
                             processText(r);
                             processContainers(r);
+                            processInlines(r);
                             processTables(r);
                             forceCodeLTR(r);
                         });
