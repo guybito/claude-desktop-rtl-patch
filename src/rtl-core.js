@@ -304,6 +304,38 @@ function segmentText(text) {
     return segs;
 }
 
+// A short Latin label that ends in punctuation ("Cynet:", "Step 2:", "Defender (MDE):").
+// Bolded inside RTL text, claude.ai renders it as its own LTR island, which pins
+// the trailing punctuation to the RIGHT of the word. Without the island it follows
+// the RTL line and sits on the LEFT, where Hebrew readers expect it.
+// Must start with a Latin letter and end with a letter/digit or a balanced closing
+// bracket before the punctuation; edge neutrals like "C++" or "(x)" stay isolated.
+var LABEL_RE = /^[A-Za-z](?:[^\n]*[A-Za-z0-9)\]])?([:;,.!?]+)$/;
+function isLatinLabel(text) {
+    var t = (text || '').trim();
+    if (t.length < 2 || t.length > 80 || hasRTL(t)) return false;
+    if (!LABEL_RE.test(t)) return false;
+    var open = 0, sq = 0;
+    for (var i = 0; i < t.length; i++) {
+        var c = t[i];
+        if (c === '(') open++; else if (c === ')') open--;
+        else if (c === '[') sq++; else if (c === ']') sq--;
+        if (open < 0 || sq < 0) return false;
+    }
+    return open === 0 && sq === 0;
+}
+
+// Index in text where the trailing punctuation of a label starts when the char
+// before it is a neutral (")" or "]"): an LRM must be inserted there, or the
+// bracket would join the RTL punctuation run once the island is removed. -1 = none.
+function labelLrmIndex(text) {
+    var t = (text || '').replace(/\s+$/, '');
+    var m = /[:;,.!?]+$/.exec(t);
+    if (!m || m.index === 0) return -1;
+    var prev = t.charAt(m.index - 1);
+    return (prev === ')' || prev === ']') ? m.index : -1;
+}
+
 // Classify a table cell's direction. A cell is RTL if it *contains* any RTL char
 // (header labels often start with a Latin term yet belong to a Hebrew column, so
 // first-strong is too weak here). Neutral cells return null so they don't sway
@@ -360,6 +392,8 @@ if (typeof module !== 'undefined' && module.exports) {
         segmentText: segmentText,
         cellDir: cellDir,
         tableDirFromCells: tableDirFromCells,
-        majorityDir: majorityDir
+        majorityDir: majorityDir,
+        isLatinLabel: isLatinLabel,
+        labelLrmIndex: labelLrmIndex
     };
 }

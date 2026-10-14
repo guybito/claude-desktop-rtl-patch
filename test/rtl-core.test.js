@@ -253,3 +253,29 @@ test('setLatinFirstEnabled: setting OFF restores the original behaviour', () => 
         assert.ok(core.latinFirstMixed('WAF rules של Cloudflare'));
     } finally { core.setLatinFirstEnabled(true); }
 });
+
+test('isLatinLabel: Latin label ending in punctuation', () => {
+    assert.ok(core.isLatinLabel('Cynet:'));
+    assert.ok(core.isLatinLabel(' Microsoft Defender: '));
+    assert.ok(core.isLatinLabel('Step 2:'));
+    assert.ok(core.isLatinLabel('file-ID-*.exe:'));
+    assert.ok(core.isLatinLabel('Note.'));
+    assert.ok(!core.isLatinLabel('Cynet'), 'no trailing punctuation');
+    assert.ok(!core.isLatinLabel('Cynet: חיפוש'), 'contains RTL');
+    assert.ok(!core.isLatinLabel('C++'), 'edge neutrals stay isolated');
+    assert.ok(!core.isLatinLabel('(Cynet):'), 'leading neutral');
+    assert.ok(!core.isLatinLabel('4,398,568.'), 'starts with a digit');
+    assert.ok(!core.isLatinLabel(':'), 'too short');
+    assert.ok(!core.isLatinLabel('x'.repeat(90) + ':'), 'too long to be a label');
+});
+
+test('isLatinLabel: brackets and labelLrmIndex', () => {
+    assert.ok(core.isLatinLabel('Microsoft Defender (MDE):'));
+    assert.ok(core.isLatinLabel('Logs [Sysmon]:'));
+    assert.ok(!core.isLatinLabel('Defender MDE):'), 'unbalanced bracket');
+    assert.ok(!core.isLatinLabel('Defender (MDE:'), 'unclosed bracket');
+    assert.strictEqual(core.labelLrmIndex('Defender (MDE):'), 14);
+    assert.strictEqual(core.labelLrmIndex('Logs [Sysmon]: '), 13);
+    assert.strictEqual(core.labelLrmIndex('Cynet:'), -1);
+    assert.strictEqual(core.labelLrmIndex('Cynet'), -1);
+});

@@ -456,11 +456,51 @@
             });
         }
 
+        // Latin labels ending in punctuation ("**Cynet:**" + Hebrew) inside an RTL block:
+        // claude.ai (and our own plaintext rule for managed children) isolates the run,
+        // so the colon renders on the word's right. Drop the isolation for these runs
+        // only, so the punctuation follows the RTL line (left). When a closing bracket
+        // precedes it ("Defender (MDE):") an LRM keeps the bracket with the Latin text.
+        // Independent of the Latin-first setting.
+        var LABEL_SEL = 'strong, b, em, i, u, mark, a, span';
+        var LABEL_FLAG = 'data-rtl-label';
+        var LRM = '\u200E';
+        function lastTextNode(el) {
+            var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null), n, last = null;
+            while ((n = w.nextNode())) { if (n.data.trim()) last = n; }
+            return last;
+        }
+        function processLabels(root) {
+            qsa(root, LABEL_SEL).forEach(function(el) {
+                if (el.hasAttribute(LABEL_FLAG)) return;
+                if (el.querySelector('code, kbd, samp, pre, br, img, svg, p, div, li, table, .katex, mjx-container, [' + ISLAND_FLAG + ']')) return;
+                var text = el.textContent || '';
+                if (!isLatinLabel(text)) return;
+                if (el.closest(EDITOR_SEL) || el.closest('pre, code, kbd, samp, .katex, mjx-container')) return;
+                var parent = el.parentElement;
+                if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
+                // Only a run that is itself a bidi island needs this; an inner label of an
+                // already-handled label (strong > a) is covered by its outer one.
+                var ub = getComputedStyle(el).unicodeBidi;
+                if (ub !== 'plaintext' && ub !== 'isolate' && ub !== 'isolate-override') return;
+                el.setAttribute(LABEL_FLAG, '');
+                el.style.setProperty('unicode-bidi', 'normal', 'important');
+                var t = lastTextNode(el);
+                if (t) {
+                    var idx = labelLrmIndex(t.data);
+                    if (idx > 0 && t.data.charAt(idx - 1) !== LRM) {
+                        t.data = t.data.slice(0, idx) + LRM + t.data.slice(idx);
+                    }
+                }
+            });
+        }
+
         function processAll() {
             isolateMath(document.body);
             processText(document);
             processContainers(document.body);
             processInlines(document.body);
+            processLabels(document.body);
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
@@ -689,6 +729,7 @@
                             processText(r);
                             processContainers(r);
                             processInlines(r);
+                            processLabels(r);
                             processTables(r);
                             forceCodeLTR(r);
                         });

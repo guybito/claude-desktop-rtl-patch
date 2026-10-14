@@ -454,6 +454,38 @@ function segmentText(text) {
     return segs;
 }
 
+// A short Latin label that ends in punctuation ("Cynet:", "Step 2:", "Defender (MDE):").
+// Bolded inside RTL text, claude.ai renders it as its own LTR island, which pins
+// the trailing punctuation to the RIGHT of the word. Without the island it follows
+// the RTL line and sits on the LEFT, where Hebrew readers expect it.
+// Must start with a Latin letter and end with a letter/digit or a balanced closing
+// bracket before the punctuation; edge neutrals like "C++" or "(x)" stay isolated.
+var LABEL_RE = /^[A-Za-z](?:[^\n]*[A-Za-z0-9)\]])?([:;,.!?]+)$/;
+function isLatinLabel(text) {
+    var t = (text || '').trim();
+    if (t.length < 2 || t.length > 80 || hasRTL(t)) return false;
+    if (!LABEL_RE.test(t)) return false;
+    var open = 0, sq = 0;
+    for (var i = 0; i < t.length; i++) {
+        var c = t[i];
+        if (c === '(') open++; else if (c === ')') open--;
+        else if (c === '[') sq++; else if (c === ']') sq--;
+        if (open < 0 || sq < 0) return false;
+    }
+    return open === 0 && sq === 0;
+}
+
+// Index in text where the trailing punctuation of a label starts when the char
+// before it is a neutral (")" or "]"): an LRM must be inserted there, or the
+// bracket would join the RTL punctuation run once the island is removed. -1 = none.
+function labelLrmIndex(text) {
+    var t = (text || '').replace(/\s+$/, '');
+    var m = /[:;,.!?]+$/.exec(t);
+    if (!m || m.index === 0) return -1;
+    var prev = t.charAt(m.index - 1);
+    return (prev === ')' || prev === ']') ? m.index : -1;
+}
+
 // Classify a table cell's direction. A cell is RTL if it *contains* any RTL char
 // (header labels often start with a Latin term yet belong to a Hebrew column, so
 // first-strong is too weak here). Neutral cells return null so they don't sway
@@ -881,11 +913,51 @@ function majorityDir(dirs) {
             });
         }
 
+        // Latin labels ending in punctuation ("**Cynet:**" + Hebrew) inside an RTL block:
+        // claude.ai (and our own plaintext rule for managed children) isolates the run,
+        // so the colon renders on the word's right. Drop the isolation for these runs
+        // only, so the punctuation follows the RTL line (left). When a closing bracket
+        // precedes it ("Defender (MDE):") an LRM keeps the bracket with the Latin text.
+        // Independent of the Latin-first setting.
+        var LABEL_SEL = 'strong, b, em, i, u, mark, a, span';
+        var LABEL_FLAG = 'data-rtl-label';
+        var LRM = '\u200E';
+        function lastTextNode(el) {
+            var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null), n, last = null;
+            while ((n = w.nextNode())) { if (n.data.trim()) last = n; }
+            return last;
+        }
+        function processLabels(root) {
+            qsa(root, LABEL_SEL).forEach(function(el) {
+                if (el.hasAttribute(LABEL_FLAG)) return;
+                if (el.querySelector('code, kbd, samp, pre, br, img, svg, p, div, li, table, .katex, mjx-container, [' + ISLAND_FLAG + ']')) return;
+                var text = el.textContent || '';
+                if (!isLatinLabel(text)) return;
+                if (el.closest(EDITOR_SEL) || el.closest('pre, code, kbd, samp, .katex, mjx-container')) return;
+                var parent = el.parentElement;
+                if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
+                // Only a run that is itself a bidi island needs this; an inner label of an
+                // already-handled label (strong > a) is covered by its outer one.
+                var ub = getComputedStyle(el).unicodeBidi;
+                if (ub !== 'plaintext' && ub !== 'isolate' && ub !== 'isolate-override') return;
+                el.setAttribute(LABEL_FLAG, '');
+                el.style.setProperty('unicode-bidi', 'normal', 'important');
+                var t = lastTextNode(el);
+                if (t) {
+                    var idx = labelLrmIndex(t.data);
+                    if (idx > 0 && t.data.charAt(idx - 1) !== LRM) {
+                        t.data = t.data.slice(0, idx) + LRM + t.data.slice(idx);
+                    }
+                }
+            });
+        }
+
         function processAll() {
             isolateMath(document.body);
             processText(document);
             processContainers(document.body);
             processInlines(document.body);
+            processLabels(document.body);
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
@@ -1114,6 +1186,7 @@ function majorityDir(dirs) {
                             processText(r);
                             processContainers(r);
                             processInlines(r);
+                            processLabels(r);
                             processTables(r);
                             forceCodeLTR(r);
                         });
