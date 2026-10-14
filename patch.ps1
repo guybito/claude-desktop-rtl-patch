@@ -3616,7 +3616,12 @@ function Install-PatchCore {
                 $NewCertBytes = $Cert.RawData
 
                 if ($NewCertBytes.Length -le $OldCertSize) {
-                    $Store.Add($Cert)
+                    # Trust a PUBLIC-ONLY copy: adding $Cert itself would carry its key-provider
+                    # link into Root, so the Root entry keeps reporting HasPrivateKey even
+                    # after the key is wiped below.
+                    $PubCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,$NewCertBytes)
+                    $PubCert.FriendlyName = "Claude_RTL_SelfSigned"
+                    $Store.Add($PubCert)
                     $ValidCertFound = $true
                     Write-Success "Generated certificate fits! ($($Config.Label), Size: $($NewCertBytes.Length) bytes, Hole: $OldCertSize bytes)"
                     break
@@ -3746,6 +3751,24 @@ function Install-PatchCore {
                 Write-Host "  * Run tools\claude-removal-diag.ps1 to locate and remove the" -ForegroundColor Cyan
                 Write-Host "    'Claude_RTL_SelfSigned' certificate and its key container." -ForegroundColor Cyan
                 Write-Host ""
+            }
+
+            # HYGIENE: every run mints a new cert. Drop the Root entries of earlier runs so
+            # only the cert that signed the current binaries stays trusted machine-wide.
+            $rootStore = $null
+            Try {
+                $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+                $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $stale = @($rootStore.Certificates | Where-Object {
+                    $_.Thumbprint -ne $Cert.Thumbprint -and
+                    ($_.FriendlyName -eq "Claude_RTL_SelfSigned" -or $_.Subject -eq $CertSubject)
+                })
+                foreach ($old in $stale) { $rootStore.Remove($old) }
+                if ($stale.Count -gt 0) { Write-Success "Removed $($stale.Count) stale RTL certificate(s) from the Root store." }
+            } Catch {
+                Write-Warn "Could not remove stale RTL certificates: $($_.Exception.Message)"
+            } Finally {
+                if ($rootStore) { $rootStore.Close() }
             }
 
         } else {
