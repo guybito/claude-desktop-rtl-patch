@@ -1,0 +1,110 @@
+<title>תיקוני RTL בתמונות</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: one narrow reading column; each problem is a card with "today" and "should be" pictures stacked. */
+:root{--bg:#f6f7f9;--fg:#1c1f24;--muted:#5f6672;--card:#fff;--line:#e1e4ea;--bad:#b3261e;--badbg:#fdecea;--ok:#1f7a3f;--okbg:#e6f4ea;--ask:#3b5bdb;--askbg:#e8edfd;--font:"Segoe UI","Noto Sans Hebrew",Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#eceef2;--muted:#a2a8b3;--card:#202329;--line:#363a42;--bad:#ff8a80;--badbg:#3a1f1d;--ok:#7bd096;--okbg:#1b3324;--ask:#9fb2ff;--askbg:#232b47;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#eceef2;--muted:#a2a8b3;--card:#202329;--line:#363a42;--bad:#ff8a80;--badbg:#3a1f1d;--ok:#7bd096;--okbg:#1b3324;--ask:#9fb2ff;--askbg:#232b47;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font:16px/1.65 var(--font)}
+main{max-width:760px;margin:0 auto;padding-block:24px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:18px}
+h1{font-size:24px;margin:0;text-wrap:balance}
+.lead{color:var(--muted);margin:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:12px;min-width:0}
+.card h2{font-size:18px;margin:0;text-wrap:balance}
+.card p{margin:0}
+.pair{display:grid;gap:10px}
+.shot{display:grid;gap:4px;min-width:0}
+.lbl{font-size:13px;font-weight:600;border-radius:4px;padding:1px 8px;justify-self:start}
+.lbl.bad{color:var(--bad);background:var(--badbg)}
+.lbl.ok{color:var(--ok);background:var(--okbg)}
+.lbl.ask{color:var(--ask);background:var(--askbg)}
+.shot .img{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:#fff}
+.shot img{display:block;max-width:none;height:auto}
+.order{font-size:14px;color:var(--muted)}
+.order ol{display:flex;flex-wrap:wrap;gap:6px 14px;margin:2px 0 0;padding:0;list-style:none;counter-reset:w}
+.order li{counter-increment:w}
+.order li::before{content:counter(w) ". ";color:var(--muted)}
+.order li span{color:var(--fg);font-weight:600;unicode-bidi:isolate}
+.q{border-inline-start:3px solid var(--ask);padding-inline-start:10px;font-weight:600}
+.tag{font-size:12px;color:var(--muted)}
+</style>
+<main dir="rtl" lang="he">
+<h1>לפני ואחרי התיקון</h1>
+<p class="lead">כל זוג תמונות צולם מאותו טקסט בדיוק. "היום" צולם עם הפאטצ' שמותקן אצלך עכשיו, ו"אחרי התיקון" צולם עם הקוד החדש. מתחת לחלק מהתמונות כתוב באיזה סדר העין של קורא עברי פוגשת את המילים, מימין לשמאל.</p>
+
+<section class="card">
+<h2>1. הדוגמה שלך: מודגש שמתחיל באנגלית</h2>
+<p>הקטע המודגש נקרא הפוך. סביר שזה קורה כי claude.ai מרנדר אותו מחדש ומוחק את התיקון שלנו.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{B_now}}" alt="היום"></div>
+<div class="order">קוראים: <ol><li><span>שה-</span></li><li><span>(ACCEPT)</span></li><li><span>אישר</span></li><li><span>FW</span></li></ol></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{B_fix}}" alt="אחרי התיקון"></div>
+<div class="order">קוראים: <ol><li><span>שה-</span></li><li><span>FW</span></li><li><span>אישר</span></li><li><span>(ACCEPT)</span></li></ol></div></div>
+</div><span class="tag">סיבה B בדוח</span></section>
+
+<section class="card">
+<h2>2. סימן פיסוק אחרי מילה מודגשת באנגלית</h2>
+<p>הנקודתיים קופצות לצד הלא נכון של המילה. אותו דבר קורה עם נקודה או פסיק.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{A_now}}" alt="היום"></div>
+<div class="order">קוראים: <ol><li><span>:</span></li><li><span>Firewall</span></li><li><span>אישר</span></li></ol></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{A_fix}}" alt="אחרי התיקון"></div>
+<div class="order">קוראים: <ol><li><span>Firewall</span></li><li><span>:</span></li><li><span>אישר</span></li></ol></div></div>
+</div><span class="tag">סיבה A בדוח</span></section>
+
+<section class="card">
+<h2>3. משפט באנגלית עם שם בעברית</h2>
+<p>משפט שכולו באנגלית הופך לכיוון ימין-לשמאל רק כי יש בו שתי מילים בעברית. הנקודה קופצת להתחלה, והשם עובר לצד הלא נכון. זו הבעיה היחידה שנוצרה בגלל השינויים שלנו.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{C_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓ (משפט אנגלי רגיל, משמאל לימין)</span><div class="img"><img src="{{C_fix}}" alt="אחרי התיקון"></div></div>
+</div><span class="tag">סיבה C בדוח</span></section>
+
+<section class="card">
+<h2>4. רשימה באנגלית שהפריט האחרון בה בעברית</h2>
+<p>הפריט האחרון מתהפך: התבליט קופץ ימינה וסדר המילים משתבש.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{D_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{D_fix}}" alt="אחרי התיקון"></div></div>
+</div><span class="tag">סיבה D בדוח</span></section>
+
+<section class="card">
+<h2>5. פריט באנגלית בתוך רשימה בעברית</h2>
+<p>התבליט של הפריט האנגלי קופץ לשמאל ונחתך, והפריט לא מיושר לשאר הרשימה.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{E_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{E_fix}}" alt="אחרי התיקון"></div></div>
+</div><span class="tag">סיבה E בדוח</span></section>
+
+<section class="card">
+<h2>6. עברית בתוך קוד (כמו הטקסט המסומן בהערה שלך)</h2>
+<p>הפאטצ' מכריח כל קוד להיות משמאל לימין, גם כשבתוכו משפט בעברית.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗</span><div class="img"><img src="{{I_now}}" alt="היום"></div>
+<div class="order">קוראים: <ol><li><span>במצרים</span></li><li><span>IP</span></li><li><span>מכתובת</span></li><li><span>MBG</span></li><li><span>נצפו פניות לשרת דרך ה-</span></li></ol></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{I_fix}}" alt="אחרי התיקון"></div>
+<div class="order">קוראים: <ol><li><span>נצפו פניות לשרת דרך ה-</span></li><li><span>MBG</span></li><li><span>מכתובת</span></li><li><span>IP</span></li><li><span>במצרים</span></li></ol></div></div>
+</div>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗: בלוק קוד (ככה הגיעה ההערה שלך)</span><div class="img"><img src="{{I2_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{I2_fix}}" alt="אחרי התיקון"></div></div>
+</div><span class="tag">סיבה I בדוח</span></section>
+
+<section class="card">
+<h2>7. סימנים ומספרים שנדבקים למילה באנגלית</h2>
+<p>זה קרה גם בלי פאטצ', כי כך עובד תקן Unicode. ביקשת לתקן, וזה תוקן.</p>
+<div class="pair">
+<div class="shot"><span class="lbl bad">היום ✗: מופיע "++C" ו-"#C"</span><div class="img"><img src="{{F1_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓</span><div class="img"><img src="{{F1_fix}}" alt="אחרי תיקון"></div></div>
+<div class="shot"><span class="lbl bad">היום ✗: נקרא "126" לפני "Rapid7"</span><div class="img"><img src="{{F2_now}}" alt="היום"></div></div>
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓: קודם "Rapid7", אחר כך "126 כתובות"</span><div class="img"><img src="{{F2_fix}}" alt="אחרי תיקון"></div></div>
+</div>
+<span class="tag">סיבה F בדוח</span></section>
+
+<section class="card">
+<h2>8. טווח מספרים: אפשרות א' (כמו היום)</h2>
+<p>בחרת להשאיר את התצוגה של היום, ולכן אין כאן שינוי.</p>
+<div class="pair">
+<div class="shot"><span class="lbl ok">אחרי התיקון ✓ (ללא שינוי)</span><div class="img"><img src="{{G_fix}}" alt="אחרי התיקון"></div></div>
+</div></section>
+</main>

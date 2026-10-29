@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>בדיקת RTL מעורב</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root{--bg:#f7f8fa;--fg:#1b1d22;--muted:#626875;--card:#fff;--line:#e0e3ea;--ok:#1f7a3f;--okbg:#e4f3e8;--bad:#b3261e;--badbg:#fbe4e2;--warn:#8a5a00;--warnbg:#fbf0d9;--na:#8a8f99;--acc:#3b5bdb}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#171716;--fg:#ecebe6;--muted:#a3a29b;--card:#22221f;--line:#3a3934;--ok:#7bd096;--okbg:#1d3324;--bad:#ff8a80;--badbg:#3d1f1c;--na:#77766f;--acc:#8ea6ff;--warn:#f0c46a;--warnbg:#3a2e14;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#171716;--fg:#ecebe6;--muted:#a3a29b;--card:#22221f;--line:#3a3934;--ok:#7bd096;--okbg:#1d3324;--bad:#ff8a80;--badbg:#3d1f1c;--na:#77766f;--acc:#8ea6ff;--warn:#f0c46a;--warnbg:#3a2e14;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 "Segoe UI",Arial,sans-serif}
+main{max-width:1180px;margin:0 auto;padding-block:20px 60px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 16px}
+.bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:12px 0 18px}
+select,button{font:inherit;padding:4px 10px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:18px}
+.sumcard{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.sumcard b{font-size:20px}
+.wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+table.m{border-collapse:collapse;width:100%;font-size:13px}
+table.m th,table.m td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:start;white-space:nowrap}
+table.m th{position:sticky;top:0;background:var(--card);font-weight:600}
+table.m td.t{white-space:normal;min-width:260px}
+.ok{color:var(--ok);background:var(--okbg);border-radius:4px;padding:1px 6px}
+.bad{color:var(--bad);background:var(--badbg);border-radius:4px;padding:1px 6px;font-weight:600}
+.na{color:var(--na)}
+tr.case{cursor:pointer}
+tr.case:hover td{background:color-mix(in srgb,var(--acc) 6%,transparent)}
+tr.detail td{background:var(--bg);white-space:normal}
+.frames{display:grid;gap:8px}
+.frames .lbl{font-size:12px;color:var(--muted);margin-bottom:2px}
+.frames iframe{width:100%;height:90px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.note{font-size:12px;color:var(--muted)}
+.cat{font-size:11px;color:var(--muted)}
+#progress{color:var(--muted)}
+.findings h2{font-size:18px;margin:8px 0}
+.f{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:10px 0}
+.f p{margin:6px 0}
+.fh{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.who{font-size:12px;color:var(--muted)}
+.tag{font-size:12px;border-radius:4px;padding:1px 7px}
+.tag.bad{color:var(--bad);background:var(--badbg)}
+.tag.warn{color:var(--warn);background:var(--warnbg)}
+.tag.ask{color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
+.ex{color:var(--muted)}
+.fix{border-inline-start:3px solid var(--ok);padding-inline-start:8px}
+code{font-family:Consolas,monospace;font-size:.9em;direction:ltr;unicode-bidi:isolate}
+</style>
+</head>
+<body>
+<main dir="rtl" lang="he">
+<h1>בדיקת תצוגה: עברית + אנגלית + מספרים</h1>
+<p class="sub">כל מקרה מוצג בדפדפן אמיתי ומושווה ל"רינדור הצפוי" (איך שקורא עברי מצפה לראות). השוואה לפי הסדר החזותי של התווים בכל שורה ולפי צד היישור.</p>
+<div class="bar">
+  <label>מצב DOM לתצוגה: <select id="ctx"></select></label>
+  <label><input type="checkbox" id="onlyBad"> רק מקרים עם כשל</label>
+  <span id="progress"></span>
+</div>
+<section class="findings">
+<h2>מה מצאתי: 9 סיבות שורש</h2>
+<p class="note">המעבדה מריצה את הקוד <b>הזהה</b> למה שמותקן אצלך (אומת מול patch.ps1), את גרסת המקור של shraga100, ובלי פאטצ' בכלל. "מצב DOM" = דימוי של איך claude.ai בונה את ה-HTML. לא היה לי גישה ל-DOM האמיתי (הדפדפן שלי לא מחובר לחשבון), לכן סיבה B היא השערה חזקה ולא ודאות.</p>
+
+<div class="f"><div class="fh"><span class="tag bad">באג</span> <b>A. כלל CSS שהופך כל מודגש/נטוי/מילה לאי נפרד</b> <span class="who">קיים גם במקור</span></div>
+<p>הפאטצ' מזריק כלל שנותן <code>unicode-bidi: plaintext</code> לכל ילד של בלוק שהוא סימן. זה נועד לבלוקים, אבל תופס גם <code>&lt;strong&gt;</code>, <code>&lt;em&gt;</code> ו-span. מודגש כזה מחליט כיוון לבד, לפי האות הראשונה שבו, ולא משתתף במשפט.</p>
+<p class="ex">דוגמאות: "<b>Firewall:</b> אישר" (הנקודתיים קופצות לצד הלא נכון), "<b>Settings.</b>", "<b>FW:</b>" ברשימה, מודגש עם נטוי בפנים (I7). במצב סטרימינג, שבו כל מילה עטופה ב-span, ביטוי אנגלי שלם מתהפך: "rules WAF and Management Bot".</p>
+<p class="fix">תיקון מוצע: להגביל את הכלל לבלוקים בלבד (p, div, li…) ולתת לריצות inline <code>unicode-bidi: normal</code>, כלומר לתת להן להשתתף במשפט כרגיל. כך מתקבלת בדיוק התוצאה ה"צפויה". מקרים: I7, I11, I15, L3, P2/P12/M2 (סטרימינג).</p></div>
+
+<div class="f"><div class="fh"><span class="tag bad">באג</span> <b>B. התיקון שלנו למודגש נמחק כש-React מרנדר מחדש</b> <span class="who">כנראה הבאג מהצילום שלך</span></div>
+<p>התיקון מ-12.10 (processInlines) כותב את התיקון ב-<code>style</code> של האלמנט. אם claude.ai כותב מחדש את ה-style (אנימציה, רינדור חוזר), התיקון נמחק, והפאטצ' לא שם לב כי הוא לא מאזין לשינויי תכונות. במעבדה זה משחזר בדיוק את הצילום: "שה-(ACCEPT) אישר FW".</p>
+<p class="fix">תיקון מוצע: לסמן את האלמנט בתכונת <code>data-</code> ולשים את הכלל בגיליון הסגנונות של הפאטצ' (עם !important), לא ב-style. כך שכתוב של style לא מוחק אותו. ובנוסף: כלל CSS גורף שמבטל את ה-plaintext של claude.ai על ריצות inline. מקרים: I1, I2, I5, I6, I12, L5, T2, M1 במצב "React מרנדר מחדש".</p></div>
+
+<div class="f"><div class="fh"><span class="tag bad">רגרסיה שלנו</span> <b>C. משפט אנגלי עם 2 מילים בעברית או יותר נהפך ל-RTL</b> <span class="who">רק בגרסה שלנו</span></div>
+<p>הכלל "שורה שנפתחת באנגלית ויש בה 2+ מילים בעברית = RTL" תופס גם משפט אנגלי שמצטט שם או ביטוי בעברית.</p>
+<p class="ex">"This report was prepared by גיא ביטון." · "The client said "לא נגענו בכלום" before the meeting." · "The status is <b>אושר סופית</b> now."</p>
+<p class="fix">תיקון מוצע: שורה שנפתחת ב-3 מילים אנגליות או יותר עם דקדוק אנגלי (the/is/was/by/as…), או שממשיכה באנגלית אחרי העברית, נשארת LTR. זה לא חל אם יש מילת קישור עברית (של, את, עם…). מקרים: P4, P5, I13.</p></div>
+
+<div class="f"><div class="fh"><span class="tag bad">באג</span> <b>D. פריט אחרון בעברית הופך רשימה אנגלית</b> <span class="who">גם במקור</span></div>
+<p class="ex">"Close as שקר חיובי" ברשימה אנגלית נהפך לפריט RTL (רוב תווים עבריים).</p>
+<p class="fix">תיקון מוצע: פריט רשימה שנפתח באנגלית מקבל את כיוון רוב הפריטים ברשימה במקום הכרעה לבד. מקרה: L4.</p></div>
+
+<div class="f"><div class="fh"><span class="tag warn">קוסמטי</span> <b>E. פריט אנגלי מלא ברשימה עברית: התבליט קופץ שמאלה</b> <span class="who">גם במקור</span></div>
+<p class="fix">תיקון מוצע: הפריט נשאר RTL (תבליט מימין, מיושר לימין), והטקסט בתוכו מסודר משמאל לימין. מקרה: L6.</p></div>
+
+<div class="f"><div class="fh"><span class="tag ask">דורש החלטה</span> <b>F. מגבלות מובנות של Unicode, גם כשהכיוון נכון</b> <span class="who">גם בלי פאטצ'</span></div>
+<p class="ex">"ב-C++" מוצג "++C". "Rapid7 126 כתובות": ה-126 נדבק ל-Rapid7 ונקרא לפניו.</p>
+<p class="fix">אפשר לתקן אם הפאטצ' יבודד כל "מילה לועזית + הסימנים שצמודים אליה" כיחידה אחת. זה משנה את ה-DOM, ולכן יש בזה סיכון מסוים לסטרימינג. מקרים: N10, I9. <b>שאלה: לטפל, או להשאיר?</b></p></div>
+
+<div class="f"><div class="fh"><span class="tag ask">דורש החלטה</span> <b>G. טווח עם רווחים: "בין 10 - 20 דקות"</b> <span class="who">שתי הגרסאות</span></div>
+<p class="fix">הפאטצ' מזהה את זה כתרגיל חשבון ומציג משמאל לימין: "10 - 20". בלי פאטצ' זה מוצג "20 - 10" (ה-10 מימין, כך שקורא עברי פוגש אותו ראשון). <b>שאלה: איזו תצוגה נכונה בעיניך?</b> מקרה: N3.</p></div>
+
+<div class="f"><div class="fh"><span class="tag warn">שולי</span> <b>H. תרגיל חשבון בזמן סטרימינג (מילים עטופות)</b></div>
+<p class="fix">"2 + 3 = 5" מתהפך כשכל מילה ב-span נפרד, כי הבידוד עובד ברמת צומת טקסט. מתוקן אוטומטית כשהסטרימינג נגמר והמילים מתאחדות, אם זה מה ש-claude.ai עושה. מקרה: N8.</p></div>
+
+<div class="f"><div class="fh"><span class="tag bad">באג</span> <b>I. עברית בתוך קוד נכפית לשמאל-לימין</b> <span class="who">גם במקור · נוסף אחרי ההערה שלך על הארטיפקט</span></div>
+<p>הפאטצ' כופה כיוון שמאל-לימין על כל <code>code</code> ו-<code>pre</code>, גם כשבפנים יש משפט עברי. ההערה שלך על ארטיפקט נשלחת לצ'אט בתוך בלוקי קוד, ולכן "נצפו פניות לשרת דרך ה-MBG מכתובת IP במצרים" יצא מבולגן, והסימן "?" עבר לצד הלא נכון. בלי פאטצ', כשיש dir נייטיבי, זה דווקא מוצג נכון.</p>
+<p class="fix">תיקון מוצע: קוד ששורותיו נפתחות בעברית מקבל כיוון ימין-לשמאל. בבלוק קוד מעורב, כל שורה מקבלת כיוון לפי עצמה: שורת הערה בעברית נקראת נכון, ופקודות נשארות משמאל לימין ומיושרות לשמאל. מקרים: C4, C5, C6.</p></div>
+
+<p class="note"><b>גרסת המקור מול שלנו:</b> בכל מצבי ה-DOM יש לגרסה שלנו פחות כשלים. גרסת המקור טובה יותר רק בסיבה C (3 מקרים). לכן אין טעם לחזור אליה. עדיף לתקן את A–E אצלנו.</p>
+</section>
+<div class="summary" id="summary"></div>
+<div class="wrap"><table class="m" id="matrix"></table></div>
+<p class="note">לחיצה על שורה פותחת תצוגה חיה: צפוי / גרסת המקור / הגרסה שלנו, במצב ה-DOM שנבחר.</p>
+</main>
+<script>
+/*__DATA__*/
+var CTXS = [
+  { id: 'legacy', name: 'צ\'אט ישן (בלי dir נייטיבי)' },
+  { id: 'native', name: 'claude.ai נייטיבי (dir על בלוקים)' },
+  { id: 'nativePlain', name: 'נייטיבי + plaintext על מודגש/קישור' },
+  { id: 'wordFade', name: 'נייטיבי + plaintext + מילים עטופות (סטרימינג)' },
+  { id: 'reRender', name: 'נייטיבי + plaintext + React מרנדר מחדש style' }
+];
+var ENGINES = [
+  { id: 'none', name: 'בלי פאטצ\'' },
+  { id: 'upstream', name: 'גרסת המקור' },
+  { id: 'installed', name: 'מותקן היום' },
+  { id: 'fork', name: 'אחרי התיקון' }
+];
+
+var BASE_CSS = 'html,body{background:#fff;color:#111}body{font:16px/1.7 "Segoe UI",Arial,sans-serif;margin:0;padding:6px 10px;width:900px}#case{white-space:nowrap}' +
+  'table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:3px 8px}code{font-family:Consolas,monospace;background:#eee;border-radius:3px;padding:0 3px}' +
+  'blockquote{border-inline-start:3px solid #aaa;margin:0;padding-inline-start:10px}p,h3,ul,ol{margin:2px 0}';
+var CTX_CSS = {
+  oracle: '#case *{unicode-bidi:normal!important}#case code,#case bdi{unicode-bidi:isolate!important}#case code{direction:ltr}',
+  legacy: '',
+  native: 'p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,.tw{unicode-bidi:isolate}td,th{text-align:left}',
+  nativePlain: 'p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,.tw{unicode-bidi:isolate}td,th{text-align:left}strong,b,em,i,a{unicode-bidi:plaintext}',
+  wordFade: 'p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,.tw{unicode-bidi:isolate}td,th{text-align:left}strong,b,em,i,a{unicode-bidi:plaintext}',
+  reRender: 'p,h1,h2,h3,h4,h5,h6,ul,ol,blockquote,.tw{unicode-bidi:isolate}td,th{text-align:left}strong,b,em,i,a{unicode-bidi:plaintext}'
+};
+
+// Runs inside each frame.
+function frameMain(o) {
+  var root = document.getElementById('case');
+  var BLOCKS = 'p,li,ul,ol,h1,h2,h3,h4,h5,h6,blockquote,table,.tw,td,th';
+  function fT(t) {
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charCodeAt(i);
+      if ((c >= 0x591 && c <= 0x7FF) || (c >= 0xFB1D && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF) || c === 0x200F || c === 0x202B || c === 0x202E) return 'rtl';
+      if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 192 && c <= 696) || (c >= 880 && c <= 1424)) return 'ltr';
+    }
+    return null;
+  }
+  function nativeEmu() {
+    root.querySelectorAll('p,h1,h2,h3,h4,h5,h6').forEach(function (el) {
+      var d = fT((el.textContent || '').slice(0, 80)); if (d) el.setAttribute('dir', d);
+    });
+    root.querySelectorAll('ul,ol').forEach(function (el) {
+      var li = el.querySelector('li'); var t = li ? ((li.firstChild && li.firstChild.textContent) || '') : '';
+      var d = fT(t.slice(0, 80)); if (d) el.setAttribute('dir', d);
+    });
+    root.querySelectorAll('blockquote').forEach(function (el) {
+      var d = fT(((el.firstElementChild || el).textContent || '').slice(0, 80)); if (d) el.setAttribute('dir', d);
+    });
+    root.querySelectorAll('.tw').forEach(function (el) {
+      var th = el.querySelector('th,td'); var d = th ? fT(th.textContent || '') : null; if (d) el.setAttribute('dir', d);
+    });
+  }
+  function wrapWords() {
+    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), list = [], n;
+    while ((n = w.nextNode())) { if (!n.parentElement.closest('code')) list.push(n); }
+    list.forEach(function (tn) {
+      var parts = tn.nodeValue.split(/(\s+)/), frag = document.createDocumentFragment();
+      parts.forEach(function (p) {
+        if (!p) return;
+        if (/^\s+$/.test(p)) frag.appendChild(document.createTextNode(p));
+        else { var s = document.createElement('span'); s.className = 'wf'; s.textContent = p; frag.appendChild(s); }
+      });
+      tn.parentNode.replaceChild(frag, tn);
+    });
+  }
+  if (o.engine === 'oracle') {
+    root.setAttribute('dir', o.dir);
+    if (!o.hasOracle) root.querySelectorAll(BLOCKS).forEach(function (el) { if (!el.hasAttribute('dir')) el.setAttribute('dir', o.dir); });
+  } else {
+    if (o.ctx !== 'legacy') nativeEmu();
+    if (o.ctx === 'wordFade') wrapWords();
+  }
+  function blockOf(el) {
+    while (el && el !== document.body) {
+      var d = getComputedStyle(el).display;
+      if (d === 'block' || d === 'list-item' || d === 'table-cell') return el;
+      el = el.parentElement;
+    }
+    return root;
+  }
+  function measure() {
+    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), n, chars = [];
+    while ((n = w.nextNode())) {
+      var t = n.nodeValue;
+      for (var i = 0; i < t.length;) {
+        var cp = t.codePointAt(i), len = cp > 0xFFFF ? 2 : 1, ch = t.substr(i, len);
+        if (!/\s/.test(ch)) {
+          var r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + len);
+          var rs = r.getClientRects();
+          if (rs.length && rs[0].width > 0) chars.push({ ch: ch, x: rs[0].left + rs[0].width / 2, y: rs[0].top + rs[0].height / 2, l: rs[0].left, r: rs[0].right, el: n.parentElement });
+        }
+        i += len;
+      }
+    }
+    // Brackets are drawn mirrored at RTL levels, so the code point alone does not
+    // say what the reader sees. Pair brackets logically, then name each by its
+    // visual shape: an opening shape faces its partner on the right.
+    var OPEN = '([{', CLOSE = ')]}', stack = [];
+    chars.forEach(function (c) {
+      var o = OPEN.indexOf(c.ch), k = CLOSE.indexOf(c.ch);
+      if (o >= 0) stack.push({ c: c, t: o });
+      else if (k >= 0) {
+        for (var s = stack.length - 1; s >= 0; s--) {
+          if (stack[s].t === k) { c.partner = stack[s].c; stack[s].c.partner = c; stack.length = s; break; }
+        }
+      }
+    });
+    chars.forEach(function (c) {
+      var t = OPEN.indexOf(c.ch); if (t < 0) t = CLOSE.indexOf(c.ch);
+      if (t >= 0 && c.partner) c.ch = c.partner.x > c.x ? OPEN[t] : CLOSE[t];
+    });
+    chars.sort(function (a, b) { return a.y - b.y; });
+    var lines = [];
+    chars.forEach(function (c) {
+      var L = lines[lines.length - 1];
+      if (L && Math.abs(c.y - L.y) < 7) L.c.push(c); else lines.push({ y: c.y, c: [c] });
+    });
+    return lines.map(function (L) {
+      L.c.sort(function (a, b) { return a.x - b.x; });
+      var b = blockOf(L.c[0].el), br = b.getBoundingClientRect(), cs = getComputedStyle(b);
+      var left = br.left + parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth);
+      var right = br.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
+      var minX = L.c[0].l, maxX = L.c[L.c.length - 1].r;
+      var gl = minX - left, gr = right - maxX;
+      var side = (gl < 30 && gr < 30) ? 'full' : (gl < gr ? 'left' : 'right');
+      return { v: L.c.map(function (c) { return c.ch; }).join(''), side: side };
+    });
+  }
+  // React re-render: the app rewrites the style attribute of inline runs (e.g. a
+  // fade/animation prop) after the patch ran. Attribute mutations are not observed
+  // by the patch, so anything it put in inline style is lost.
+  if (o.ctx === 'reRender') setTimeout(function () {
+    root.querySelectorAll('strong,b,em,i,a,span').forEach(function (el) { el.setAttribute('style', 'opacity:1'); });
+  }, 200);
+  setTimeout(function () {
+    var res = null, err = null;
+    try { res = measure(); } catch (e) { err = String(e); }
+    parent.postMessage({ key: o.key, res: res, err: err }, '*');
+  }, o.wait || 350);
+}
+
+function frameDoc(c, ctx, engine, key) {
+  var isO = engine === 'oracle';
+  var body = isO ? (c.oracle || c.html) : c.html;
+  var css = BASE_CSS + CTX_CSS[isO ? 'oracle' : ctx];
+  var opts = { engine: engine, ctx: ctx, dir: c.dir, hasOracle: !!c.oracle, key: key };
+  return '<!doctype html><html><head><meta charset="utf-8"><style>' + css + '</style></head><body><div id="case">' + body +
+    '</div><script>(' + frameMain.toString() + ')(' + JSON.stringify(opts) + ')<\/script>' +
+    // The payload is inlined (not read from parent) so frames work in a sandboxed host too.
+    (isO || engine === 'none' ? '' : '<script>' + PAYLOADS[engine].replace(/<\/script/gi, '<\\/script') + '<\/script>') +
+    '</body></html>';
+}
+
+var RESULTS = {};   // key -> lines
+window.AUDIT = { RESULTS: RESULTS, CASES: CASES };
+var waiters = {};
+window.addEventListener('message', function (e) {
+  var d = e.data; if (!d || !d.key || !waiters[d.key]) return;
+  RESULTS[d.key] = d.err ? { err: d.err } : d.res;
+  waiters[d.key](); delete waiters[d.key];
+});
+
+function runFrame(c, ctx, engine, key, holder, visible) {
+  return new Promise(function (resolve) {
+    var f = document.createElement('iframe');
+    if (!visible) { f.style.cssText = 'position:absolute;left:-10000px;top:0;width:940px;height:200px'; }
+    waiters[key] = function () {
+      if (!visible) f.remove();
+      else { try { f.style.height = (f.contentDocument.body.scrollHeight + 8) + 'px'; } catch (e) {} }
+      resolve();
+    };
+    f.srcdoc = frameDoc(c, ctx, engine, key);
+    (holder || document.body).appendChild(f);
+  });
+}
+
+function same(a, b) {
+  if (!a || !b || a.err || b.err || a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].v !== b[i].v) return false;
+    if (a[i].side !== b[i].side && a[i].side !== 'full' && b[i].side !== 'full') return false;
+  }
+  return true;
+}
+function verdict(c, ctx, eng) {
+  var o = RESULTS[c.id + '|oracle'], r = RESULTS[c.id + '|' + ctx + '|' + eng];
+  if (!o || !r) return null;
+  return same(o, r);
+}
+
+async function runAll() {
+  var jobs = [];
+  CASES.forEach(function (c) {
+    jobs.push([c, 'legacy', 'oracle', c.id + '|oracle']);
+    CTXS.forEach(function (x) { ENGINES.forEach(function (e) { jobs.push([c, x.id, e.id, c.id + '|' + x.id + '|' + e.id]); }); });
+  });
+  var done = 0, i = 0, prog = document.getElementById('progress');
+  async function worker() {
+    while (i < jobs.length) {
+      var j = jobs[i++];
+      await runFrame(j[0], j[1], j[2], j[3]);
+      done++; if (done % 10 === 0) prog.textContent = 'מריץ… ' + done + '/' + jobs.length;
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+  prog.textContent = 'הסתיים: ' + jobs.length + ' רינדורים';
+  window.AUDIT.done = true;
+  render();
+}
+
+function badge(v) { return v === null ? '<span class="na">–</span>' : (v ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>'); }
+
+function render() {
+  var sum = document.getElementById('summary'), html = '';
+  CTXS.forEach(function (x) {
+    var line = ENGINES.map(function (e) {
+      var bad = CASES.filter(function (c) { return verdict(c, x.id, e.id) === false; }).length;
+      return e.name + ': <b>' + bad + '</b>';
+    }).join(' · ');
+    html += '<div class="sumcard"><div>' + x.name + '</div><div class="note">כשלים מתוך ' + CASES.length + '</div><div>' + line + '</div></div>';
+  });
+  sum.innerHTML = html;
+  var only = document.getElementById('onlyBad').checked;
+  var ctx = document.getElementById('ctx').value;
+  var t = '<tr><th>#</th><th>מקרה</th>';
+  ENGINES.forEach(function (e) { t += '<th>' + e.name + '</th>'; });
+  t += '<th>אחרי התיקון נכשל גם ב…</th></tr>';
+  CASES.forEach(function (c) {
+    var anyBad = CTXS.some(function (x) { return ENGINES.some(function (e) { return e.id !== 'none' && verdict(c, x.id, e.id) === false; }); });
+    if (only && !anyBad) return;
+    t += '<tr class="case" data-id="' + c.id + '"><td>' + c.id + '</td><td class="t">' + c.title + '<div class="cat">' + c.cat + (c.note ? ' · ' + c.note : '') + '</div></td>';
+    ENGINES.forEach(function (e) { t += '<td>' + badge(verdict(c, ctx, e.id)) + '</td>'; });
+    var other = CTXS.filter(function (x) { return x.id !== ctx && verdict(c, x.id, 'fork') === false; }).map(function (x) { return x.name; });
+    t += '<td class="t note">' + (other.join(' · ') || '—') + '</td></tr>';
+  });
+  var m = document.getElementById('matrix'); m.innerHTML = t;
+  m.querySelectorAll('tr.case').forEach(function (tr) { tr.addEventListener('click', function () { toggle(tr); }); });
+}
+
+function toggle(tr) {
+  var nx = tr.nextElementSibling;
+  if (nx && nx.classList.contains('detail')) { nx.remove(); return; }
+  var c = CASES.filter(function (k) { return k.id === tr.dataset.id; })[0];
+  var ctx = document.getElementById('ctx').value;
+  var d = document.createElement('tr'); d.className = 'detail';
+  var td = document.createElement('td'); td.colSpan = 7;
+  var box = document.createElement('div'); box.className = 'frames';
+  td.appendChild(box); d.appendChild(td); tr.after(d);
+  [['oracle', 'צפוי (איך שצריך להיראות)'], ['installed', 'מותקן היום'], ['fork', 'אחרי התיקון']].forEach(function (p) {
+    var w = document.createElement('div');
+    var key = 'view|' + c.id + '|' + ctx + '|' + p[0] + '|' + Math.random();
+    var v = p[0] === 'oracle' ? null : verdict(c, ctx, p[0]);
+    w.innerHTML = '<div class="lbl">' + p[1] + ' ' + (p[0] === 'oracle' ? '' : badge(v)) + '</div>';
+    box.appendChild(w);
+    runFrame(c, ctx, p[0], key, w, true);
+  });
+}
+
+(function init() {
+  var s = document.getElementById('ctx');
+  CTXS.forEach(function (x) { var o = document.createElement('option'); o.value = x.id; o.textContent = x.name; s.appendChild(o); });
+  s.value = 'nativePlain';
+  document.getElementById('onlyBad').addEventListener('change', render);
+  s.addEventListener('change', render);
+  if (window.PRECOMPUTED) { Object.assign(RESULTS, window.PRECOMPUTED); prog(); render(); }
+  else runAll();
+  function prog() { document.getElementById('progress').textContent = 'תוצאות שנמדדו מראש · אפשר לפתוח כל שורה לתצוגה חיה'; }
+})();
+</script>
+</body>
+</html>

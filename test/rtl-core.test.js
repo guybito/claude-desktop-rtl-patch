@@ -253,3 +253,47 @@ test('setLatinFirstEnabled: setting OFF restores the original behaviour', () => 
         assert.ok(core.latinFirstMixed('WAF rules של Cloudflare'));
     } finally { core.setLatinFirstEnabled(true); }
 });
+
+test('englishSentence: English sentences quoting Hebrew stay LTR', () => {
+    assert.ok(core.englishSentence('This report was prepared by גיא ביטון.'));
+    assert.ok(core.englishSentence('The client said "לא נגענו בכלום" before the meeting.'));
+    assert.ok(core.englishSentence('The status is אושר סופית now.'));
+    assert.ok(!core.latinFirstMixed('This report was prepared by גיא ביטון.'));
+    assert.strictEqual(core.lineDir('The status is אושר סופית now.'), 'ltr');
+    // Hebrew sentences that open with an English name still flip
+    assert.ok(!core.englishSentence('Bank of America חסם את הכרטיס'));
+    assert.ok(core.latinFirstMixed('Bank of America חסם את הכרטיס'));
+    assert.ok(core.latinFirstMixed('Microsoft Defender for Endpoint on Windows Server זיהה את הקובץ.'));
+    assert.ok(core.latinFirstMixed('The word שלום הוא ברכה'));
+    try {
+        core.setLatinFirstEnabled(false);
+        assert.ok(!core.englishSentence('This report was prepared by גיא ביטון.'));
+    } finally { core.setLatinFirstEnabled(true); }
+});
+
+test('findLatinIslands: trailing symbols and a Latin word before a Hebrew count', () => {
+    const isl = s => core.findLatinIslands(s).map(r => s.slice(r[0], r[1]));
+    assert.deepStrictEqual(isl('הכלי כתוב ב-C++ והשני ב-C#'), ['C++', 'C#']);
+    assert.deepStrictEqual(isl('בדקתי את Rapid7 126 כתובות שנחסמו.'), ['Rapid7']);
+    assert.deepStrictEqual(isl('ה-Agent 5 גרסאות'), ['Agent']);
+    // a version number that belongs to the product is left alone
+    assert.deepStrictEqual(isl('השרתים הם Windows Server 2022 ו-Windows 11.'), []);
+    assert.deepStrictEqual(isl('x+y=5'), []);
+    assert.deepStrictEqual(isl('החוק (Rule ID 4521, ראו למטה) פעיל.'), []);
+    assert.deepStrictEqual(isl('נמצאו 126 כתובות IP'), []);
+});
+
+test('segmentText: Latin islands become isolated segments, arithmetic still wins', () => {
+    const segs = core.segmentText('הכלי כתוב ב-C++ היום');
+    assert.deepStrictEqual(segs.filter(s => s.type === 'math').map(s => s.value), ['C++']);
+    const m = core.segmentText('החישוב הוא 2 + 3 = 5 ולכן');
+    assert.deepStrictEqual(m.filter(s => s.type === 'math').map(s => s.value), ['2 + 3 = 5']);
+});
+
+test('codeTextMode: Hebrew prose in code vs code with Hebrew comments', () => {
+    assert.strictEqual(core.codeTextMode('netstat -ano'), 'ltr');
+    assert.strictEqual(core.codeTextMode('echo "שלום"'), 'ltr');
+    assert.strictEqual(core.codeTextMode('נצפו פניות לשרת דרך ה-MBG מכתובת IP במצרים\nמה הפניות שנצפו?'), 'rtl');
+    assert.strictEqual(core.codeTextMode('# בודקים את החיבורים\nnetstat -ano | findstr 443'), 'mixed');
+    assert.strictEqual(core.codeTextMode(''), 'ltr');
+});

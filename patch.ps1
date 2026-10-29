@@ -258,9 +258,35 @@ var LATIN_FIRST_ENABLED = true;
 function setLatinFirstEnabled(on) { LATIN_FIRST_ENABLED = !!on; }
 function isLatinFirstEnabled() { return LATIN_FIRST_ENABLED; }
 
+// An English sentence that quotes Hebrew ("This report was prepared by <name>",
+// "The client said <quote> before the meeting"): it opens with 3+ Latin words that
+// carry English grammar, and either the Hebrew part has no Hebrew function word /
+// glued prefix, or English resumes after the Hebrew (2+ Latin words). Such a line
+// stays LTR whatever the RTL word count or majority says. Part of the Latin-first
+// setting.
+var RTL_CHAR_RE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+function latinWordCount(s) {
+    var toks = s.split(/\s+/), n = 0;
+    for (var i = 0; i < toks.length; i++) if (/[A-Za-z]/.test(toks[i]) && !hasRTL(toks[i])) n++;
+    return n;
+}
+function englishSentence(text) {
+    if (!LATIN_FIRST_ENABLED || !text) return false;
+    if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
+    var first = text.search(RTL_CHAR_RE);
+    var lead = text.slice(0, first);
+    if (latinWordCount(lead) < 3 || !EN_GRAMMAR_RE.test(lead)) return false;
+    var last = first, m, re = new RegExp(RTL_CHAR_RE.source, 'g');
+    while ((m = re.exec(text)) !== null) last = m.index;
+    var tail = text.slice(last + 1);
+    if (latinWordCount(tail) >= 2) return true;
+    return !HE_FUNCTION_WORD_RE.test(text) && !HE_PREFIX_LATIN_RE.test(text);
+}
+
 function latinFirstMixed(text) {
     if (!LATIN_FIRST_ENABLED) return false;
     if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
+    if (englishSentence(text)) return false;
     if (rtlWordCount(text) >= 2) return true;
     if (HE_FUNCTION_WORD_RE.test(text) || HE_PREFIX_LATIN_RE.test(text)) return true;
     return !EN_GRAMMAR_RE.test(text);
@@ -422,20 +448,47 @@ function findMathRanges(text) {
     }
 }
 
+// --- LATIN ISLANDS ---
+// Two bidi-algorithm quirks a correct block direction cannot fix:
+//   * trailing symbols of a Latin word are neutral, so in RTL text "C++" / "C#"
+//     render as "++C" / "#C";
+//   * a number after a Latin word sticks to it, so "Rapid7 126 <Hebrew word>" reads
+//     126 before Rapid7. When the number is followed by a Hebrew word it counts
+//     that word, so the Latin run is isolated on its own and the number stays with
+//     the Hebrew.
+// Isolating an LTR-only run is a no-op in LTR text, so these are safe everywhere.
+var LATIN_SYMBOL_RE = /(^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*[+#]+)(?![A-Za-z0-9+#])/g;
+var LATIN_BEFORE_COUNT_RE = /(^|[^A-Za-z0-9.\-_\u0590-\u05FF]|[\u0590-\u05FF]-)([A-Za-z][\w.\-]*(?:[ \t]+[A-Za-z][\w.\-]*)*)(?=[ \t]+\d+(?:[.,]\d+)*%?[ \t]+[\u0590-\u05FF]{2})/g;
+
+function findLatinIslands(text) {
+    var ranges = [];
+    if (!text || !/[A-Za-z]/.test(text)) return ranges;
+    [LATIN_SYMBOL_RE, LATIN_BEFORE_COUNT_RE].forEach(function (re) {
+        var m;
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+            var s = m.index + m[1].length;
+            ranges.push([s, s + m[2].length]);
+            if (m[0].length === 0) re.lastIndex++;
+        }
+    });
+    return ranges;
+}
+
 // Split text into alternating {type:'text'|'math', value} segments. 'math' covers
-// LaTeX islands and bare arithmetic; the DOM layer isolates both LTR. LaTeX wins
-// when the two overlap.
+// LaTeX islands, bare arithmetic and Latin islands; the DOM layer isolates all of
+// them LTR. LaTeX wins over arithmetic, which wins over Latin islands.
 function segmentText(text) {
     var segs = [];
     if (!text) return segs;
     var ranges = findLatexRanges(text);
-    var numeric = findMathRanges(text);
-    for (var n = 0; n < numeric.length; n++) {
-        var ns = numeric[n][0], ne = numeric[n][1], clash = false;
+    var extra = findMathRanges(text).concat(findLatinIslands(text));
+    for (var n = 0; n < extra.length; n++) {
+        var ns = extra[n][0], ne = extra[n][1], clash = false;
         for (var c = 0; c < ranges.length; c++) {
             if (ns < ranges[c][1] && ne > ranges[c][0]) { clash = true; break; }
         }
-        if (!clash) ranges.push(numeric[n]);
+        if (!clash) ranges.push(extra[n]);
     }
     if (!ranges.length) {
         segs.push({ type: 'text', value: text });
@@ -452,6 +505,21 @@ function segmentText(text) {
     }
     if (pos < text.length) segs.push({ type: 'text', value: text.slice(pos) });
     return segs;
+}
+
+// Direction mode for a code block or inline code: 'ltr' (no line opens RTL),
+// 'rtl' (every line with a strong char opens RTL -- Hebrew prose that arrived in a
+// code fence) or 'mixed' (Hebrew comment lines next to code lines: each line then
+// takes its own direction).
+function codeTextMode(text) {
+    if (!text || !hasRTL(text)) return 'ltr';
+    var lines = text.split('\n'), r = 0, l = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var d = firstStrong(lines[i]);
+        if (d === 'rtl') r++; else if (d === 'ltr') l++;
+    }
+    if (!r) return 'ltr';
+    return l ? 'mixed' : 'rtl';
 }
 
 // Classify a table cell's direction. A cell is RTL if it *contains* any RTL char
@@ -516,6 +584,7 @@ function majorityDir(dirs) {
         // scripts; forcing one dir mangles the disagreeing lines. We defer to
         // unicode-bidi:plaintext and flag data-rtl-split so later passes skip it.
         var RTL_SPLIT_FLAG = 'data-rtl-split';
+        var TEXT_BLOCK_SEL = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, summary, dt, dd';
         var BR_OR_NL_SPLIT = /(<br\s*\/?>|\n)/i;
 
         function hasMultiScriptLines(el) {
@@ -572,14 +641,18 @@ function majorityDir(dirs) {
             var noCode = textWithoutCode(el);
             var d = firstStrong(noCode);
             if (d === 'rtl') return 'rtl';
+            // Nothing but code carries letters, and that code is Hebrew prose.
+            if (!d && codeTextMode(full) === 'rtl') return 'rtl';
 
             // Layer 2: strip leading filenames/URLs, then first-strong.
             var stripped = stripLeadingLTR(noCode);
             d = firstStrong(stripped);
             if (d === 'rtl') return 'rtl';
 
-            // Layer 3: RTL chars exist but first-strong still says LTR after stripping --
-            // majority script decides, or the Latin-first mixed rule applies.
+            // Layer 3: RTL chars exist but first-strong still says LTR after stripping.
+            // An English sentence quoting Hebrew stays LTR; otherwise majority script
+            // decides, or the Latin-first mixed rule applies.
+            if (englishSentence(noCode)) return null;
             return (rtlMajority(noCode) || latinFirstMixed(noCode)) ? 'rtl' : null;
         }
 
@@ -610,7 +683,22 @@ function majorityDir(dirs) {
             d = firstStrong(stripped);
             if (d === 'rtl') return 'rtl';
 
+            if (englishSentence(text)) return 'ltr';
             return (rtlMajority(text) || latinFirstMixed(text)) ? 'rtl' : 'ltr';
+        }
+
+        // A list item judged on its own can disagree with its list. A Latin-first item
+        // that only ends in Hebrew ("Close as <Hebrew>") follows an LTR list; a pure
+        // Latin item inside an RTL list stays RTL so its bullet and alignment match
+        // its siblings (Latin words keep their own order either way).
+        function liDir(li, dir) {
+            var list = li.parentElement;
+            if (!list || !/^(UL|OL)$/.test(list.tagName)) return dir;
+            if (dir === 'rtl' && firstStrong(textWithoutCode(li)) === 'ltr' &&
+                    listConfidentDir(list) === 'ltr') return null;
+            if (!dir && firstStrong(textWithoutCode(li)) === 'ltr' &&
+                    listConfidentDir(list) === 'rtl') return 'rtl';
+            return dir;
         }
 
         // --- ELEMENT PROCESSING ---
@@ -623,16 +711,39 @@ function majorityDir(dirs) {
             return els;
         }
 
+        // Code is LTR, except Hebrew prose that arrives in a code fence or backticks
+        // (e.g. the quoted text of an artifact comment): an all-RTL block reads RTL,
+        // and a block mixing Hebrew comment lines with code lines gets per-line
+        // direction (CODE_MIX_FLAG -> unicode-bidi:plaintext) while staying left-aligned.
+        var CODE_MIX_FLAG = 'data-rtl-codemix';
+        function stampCode(el, mode) {
+            if (mode === 'rtl') {
+                stampDir(el, 'rtl'); el.style.textAlign = ''; el.style.unicodeBidi = 'isolate';
+                el.removeAttribute(CODE_MIX_FLAG);
+                return;
+            }
+            stampDir(el, 'ltr'); el.style.textAlign = 'left'; el.style.unicodeBidi = 'embed';
+            if (mode === 'mixed') el.setAttribute(CODE_MIX_FLAG, '1');
+            else el.removeAttribute(CODE_MIX_FLAG);
+        }
+
         function forceCodeLTR(root) {
             // Inside editors the stylesheet already pins pre/code/katex LTR; stamping here
             // would fight ProseMirror (issue #33).
             qsa(root, 'pre, .code-block__code, .relative.group\\/copy').forEach(function(b) {
                 if (b.closest(EDITOR_SEL)) return;
-                stampDir(b, 'ltr'); b.style.textAlign = 'left'; b.style.unicodeBidi = 'embed';
+                // A copy-button wrapper also holds the language label; judge its <pre>.
+                var src = b.matches('pre') ? b : (b.querySelector('pre') || b);
+                stampCode(b, codeTextMode(src.textContent || ''));
             });
             qsa(root, 'code').forEach(function(c) {
                 if (c.closest(EDITOR_SEL)) return;
-                if (!c.closest('pre') && !c.closest('.code-block__code')) stampDir(c, 'ltr');
+                var block = c.closest('pre, .code-block__code');
+                if (!block) {
+                    stampDir(c, codeTextMode(c.textContent || '') === 'rtl' ? 'rtl' : 'ltr');
+                } else if (block.getAttribute('dir') === 'rtl') {
+                    stampDir(c, 'rtl');
+                }
             });
             qsa(root, '.katex, .katex-display, mjx-container').forEach(function(m) {
                 if (m.closest(EDITOR_SEL)) return;
@@ -669,7 +780,8 @@ function majorityDir(dirs) {
                     // Cheap pre-filter: a LaTeX hint ($ or \) OR a numeric hint (digit AND operator).
                     var hasTex = v.indexOf('$') !== -1 || v.indexOf('\\') !== -1;
                     var hasNum = MATH_DIGIT_RE.test(v) && MATH_OP_RE.test(v);
-                    if (!hasTex && !hasNum) return NodeFilter.FILTER_REJECT;
+                    var hasLat = /[A-Za-z][+#]|[A-Za-z]\w*[ \t]+\d/.test(v);
+                    if (!hasTex && !hasNum && !hasLat) return NodeFilter.FILTER_REJECT;
                     var p = node.parentElement;
                     if (!p) return NodeFilter.FILTER_REJECT;
                     if (p.tagName === 'SCRIPT' || p.tagName === 'STYLE') return NodeFilter.FILTER_REJECT;
@@ -764,6 +876,7 @@ function majorityDir(dirs) {
                     return;
                 }
                 var dir = detectElDir(el);
+                if (el.tagName === 'LI') dir = liDir(el, dir);
                 if (dir) {
                     if (dir === 'rtl' && hasMultiScriptLines(el)) {
                         splitOrRtl(el);
@@ -820,7 +933,15 @@ function majorityDir(dirs) {
                 if (inNativeDirSubtree(el)) return;
                 if (el.hasAttribute(RTL_SPLIT_FLAG)) return;
                 if (el.hasAttribute(ISLAND_FLAG)) return;
+                // Inline runs inside a text block are part of that block's paragraph;
+                // a dir of their own would isolate them (word spans, links).
+                if ((el.tagName === 'SPAN' || el.tagName === 'A') && el.closest(TEXT_BLOCK_SEL)) return;
                 var parent = el.parentElement;
+                // Same for an inline fragment of a larger text run (word spans in a
+                // user message): it shares its parent's paragraph.
+                if ((el.tagName === 'SPAN' || el.tagName === 'A') && parent &&
+                        (parent.textContent || '').trim() !== (el.textContent || '').trim() &&
+                        getComputedStyle(el).display === 'inline') return;
                 if (parent && parent.hasAttribute(RTL_SPLIT_FLAG)) return;
                 if (el.querySelector('p, div, ul, ol, h1, h2, h3, h4, h5, h6, pre, table')) return;
                 if (/^(P|LI|H[1-6]|BLOCKQUOTE|TD|TH|UL|OL)$/.test(el.tagName)) return;
@@ -852,40 +973,10 @@ function majorityDir(dirs) {
             });
         }
 
-        // Inline runs (bold, links, spans) inside an RTL block that resolve LTR on
-        // their own -- e.g. claude.ai's unicode-bidi:plaintext, a native dir="auto"
-        // or a stale ltr stamp on <strong> whose
-        // text opens with a Latin word ("CAPTCHA" + Hebrew). The block is RTL but the
-        // run renders as an LTR island, so its Hebrew words appear before the Latin
-        // one. Flip such runs to RTL when the Latin-first rule says so. Code, math
-        // islands and editors are never touched. Part of the Latin-first setting.
-        var INLINE_SEL = 'strong, b, em, i, u, s, mark, a, span';
-        function processInlines(root) {
-            if (!isLatinFirstEnabled()) return;
-            qsa(root, INLINE_SEL).forEach(function(el) {
-                var text = (el.textContent || '').trim();
-                if (text.length < 2 || !hasRTL(text) || firstStrong(text) !== 'ltr') return;
-                if (el.closest(EDITOR_SEL) || el.closest('pre, code, kbd, samp, .katex, mjx-container')) return;
-                if (el.hasAttribute(ISLAND_FLAG) || el.hasAttribute(RTL_SPLIT_FLAG)) return;
-                if (el.querySelector('p, div, ul, ol, li, table, pre')) return;
-                var parent = el.parentElement;
-                if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
-                // An LTR resolve comes either from direction:ltr or from the app's own
-                // unicode-bidi:plaintext on inline runs (first strong char wins, dir is
-                // ignored). Override both, the latter with !important.
-                var cs = getComputedStyle(el);
-                if (cs.direction !== 'ltr' && cs.unicodeBidi !== 'plaintext') return;
-                if (detectTextDir(text) !== 'rtl') return;
-                stampDir(el, 'rtl');
-                el.style.setProperty('unicode-bidi', 'isolate', 'important');
-            });
-        }
-
         function processAll() {
             isolateMath(document.body);
             processText(document);
             processContainers(document.body);
-            processInlines(document.body);
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
@@ -907,7 +998,17 @@ function majorityDir(dirs) {
                 // Scoped to patch-owned dirs: native-dir'd blocks have their own layout
                 // children (word-fade spans) that a blanket plaintext rule disturbs.
                 '[data-rtl-managed][dir]{text-align:start!important}[data-rtl-managed][dir="rtl"]{direction:rtl!important}[data-rtl-managed][dir="ltr"]{direction:ltr!important}',
-                '[data-rtl-managed][dir]>*:not([dir]):not(pre):not(code):not(.code-block__code){unicode-bidi:plaintext;text-align:start}',
+                // Block children only: an inline child (bold, link, word span) given
+                // plaintext would pick its own direction and leave the sentence.
+                '[data-rtl-managed][dir]>:is(p,div,li,ul,ol,blockquote,h1,h2,h3,h4,h5,h6,table,section,article,details,summary,dl,dt,dd,figure,figcaption):not([dir]):not(pre):not(.code-block__code){unicode-bidi:plaintext;text-align:start}',
+                // Inline formatting inside a text block joins the block's paragraph, as
+                // the bidi algorithm intends. claude.ai gives some runs
+                // unicode-bidi:plaintext (or dir=auto), which makes a run that opens
+                // with a Latin word ("FW <Hebrew> (ACCEPT)") render as a reversed LTR
+                // island. A stylesheet rule survives React rewriting inline styles.
+                ':is(p,li,h1,h2,h3,h4,h5,h6,blockquote,td,th,summary,dt,dd) :is(strong,b,em,i,u,s,mark,a,del,ins,sub,sup,small,abbr,cite,q,dfn):not(.ProseMirror *):not([contenteditable="true"] *){unicode-bidi:normal!important}',
+                // Code mixing Hebrew comment lines with code lines: per-line direction.
+                '[data-rtl-codemix],[data-rtl-codemix] code{unicode-bidi:plaintext!important}',
                 // RTL: flip sidebar truncation gradient to fade the LEFT edge (issue #7).
                 '[dir="rtl"][class*="mask-image:linear-gradient(to_right"]{-webkit-mask-image:linear-gradient(to left,hsl(var(--always-black)) 85%,transparent 99%)!important;mask-image:linear-gradient(to left,hsl(var(--always-black)) 85%,transparent 99%)!important}',
                 '.group:hover [dir="rtl"][class*="mask-image:linear-gradient(to_right"],.group:focus-within [dir="rtl"][class*="mask-image:linear-gradient(to_right"],[data-menu-open="true"] [dir="rtl"][class*="mask-image:linear-gradient(to_right"]{-webkit-mask-image:linear-gradient(to left,hsl(var(--always-black)) 60%,transparent 78%)!important;mask-image:linear-gradient(to left,hsl(var(--always-black)) 60%,transparent 78%)!important}'
@@ -1113,7 +1214,6 @@ function majorityDir(dirs) {
                             isolateMath(r);
                             processText(r);
                             processContainers(r);
-                            processInlines(r);
                             processTables(r);
                             forceCodeLTR(r);
                         });

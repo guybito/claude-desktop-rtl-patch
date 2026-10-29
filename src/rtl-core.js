@@ -108,9 +108,35 @@ var LATIN_FIRST_ENABLED = true;
 function setLatinFirstEnabled(on) { LATIN_FIRST_ENABLED = !!on; }
 function isLatinFirstEnabled() { return LATIN_FIRST_ENABLED; }
 
+// An English sentence that quotes Hebrew ("This report was prepared by <name>",
+// "The client said <quote> before the meeting"): it opens with 3+ Latin words that
+// carry English grammar, and either the Hebrew part has no Hebrew function word /
+// glued prefix, or English resumes after the Hebrew (2+ Latin words). Such a line
+// stays LTR whatever the RTL word count or majority says. Part of the Latin-first
+// setting.
+var RTL_CHAR_RE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+function latinWordCount(s) {
+    var toks = s.split(/\s+/), n = 0;
+    for (var i = 0; i < toks.length; i++) if (/[A-Za-z]/.test(toks[i]) && !hasRTL(toks[i])) n++;
+    return n;
+}
+function englishSentence(text) {
+    if (!LATIN_FIRST_ENABLED || !text) return false;
+    if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
+    var first = text.search(RTL_CHAR_RE);
+    var lead = text.slice(0, first);
+    if (latinWordCount(lead) < 3 || !EN_GRAMMAR_RE.test(lead)) return false;
+    var last = first, m, re = new RegExp(RTL_CHAR_RE.source, 'g');
+    while ((m = re.exec(text)) !== null) last = m.index;
+    var tail = text.slice(last + 1);
+    if (latinWordCount(tail) >= 2) return true;
+    return !HE_FUNCTION_WORD_RE.test(text) && !HE_PREFIX_LATIN_RE.test(text);
+}
+
 function latinFirstMixed(text) {
     if (!LATIN_FIRST_ENABLED) return false;
     if (firstStrong(text) !== 'ltr' || !hasRTL(text)) return false;
+    if (englishSentence(text)) return false;
     if (rtlWordCount(text) >= 2) return true;
     if (HE_FUNCTION_WORD_RE.test(text) || HE_PREFIX_LATIN_RE.test(text)) return true;
     return !EN_GRAMMAR_RE.test(text);
@@ -272,20 +298,47 @@ function findMathRanges(text) {
     }
 }
 
+// --- LATIN ISLANDS ---
+// Two bidi-algorithm quirks a correct block direction cannot fix:
+//   * trailing symbols of a Latin word are neutral, so in RTL text "C++" / "C#"
+//     render as "++C" / "#C";
+//   * a number after a Latin word sticks to it, so "Rapid7 126 <Hebrew word>" reads
+//     126 before Rapid7. When the number is followed by a Hebrew word it counts
+//     that word, so the Latin run is isolated on its own and the number stays with
+//     the Hebrew.
+// Isolating an LTR-only run is a no-op in LTR text, so these are safe everywhere.
+var LATIN_SYMBOL_RE = /(^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*[+#]+)(?![A-Za-z0-9+#])/g;
+var LATIN_BEFORE_COUNT_RE = /(^|[^A-Za-z0-9.\-_\u0590-\u05FF]|[\u0590-\u05FF]-)([A-Za-z][\w.\-]*(?:[ \t]+[A-Za-z][\w.\-]*)*)(?=[ \t]+\d+(?:[.,]\d+)*%?[ \t]+[\u0590-\u05FF]{2})/g;
+
+function findLatinIslands(text) {
+    var ranges = [];
+    if (!text || !/[A-Za-z]/.test(text)) return ranges;
+    [LATIN_SYMBOL_RE, LATIN_BEFORE_COUNT_RE].forEach(function (re) {
+        var m;
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+            var s = m.index + m[1].length;
+            ranges.push([s, s + m[2].length]);
+            if (m[0].length === 0) re.lastIndex++;
+        }
+    });
+    return ranges;
+}
+
 // Split text into alternating {type:'text'|'math', value} segments. 'math' covers
-// LaTeX islands and bare arithmetic; the DOM layer isolates both LTR. LaTeX wins
-// when the two overlap.
+// LaTeX islands, bare arithmetic and Latin islands; the DOM layer isolates all of
+// them LTR. LaTeX wins over arithmetic, which wins over Latin islands.
 function segmentText(text) {
     var segs = [];
     if (!text) return segs;
     var ranges = findLatexRanges(text);
-    var numeric = findMathRanges(text);
-    for (var n = 0; n < numeric.length; n++) {
-        var ns = numeric[n][0], ne = numeric[n][1], clash = false;
+    var extra = findMathRanges(text).concat(findLatinIslands(text));
+    for (var n = 0; n < extra.length; n++) {
+        var ns = extra[n][0], ne = extra[n][1], clash = false;
         for (var c = 0; c < ranges.length; c++) {
             if (ns < ranges[c][1] && ne > ranges[c][0]) { clash = true; break; }
         }
-        if (!clash) ranges.push(numeric[n]);
+        if (!clash) ranges.push(extra[n]);
     }
     if (!ranges.length) {
         segs.push({ type: 'text', value: text });
@@ -302,6 +355,21 @@ function segmentText(text) {
     }
     if (pos < text.length) segs.push({ type: 'text', value: text.slice(pos) });
     return segs;
+}
+
+// Direction mode for a code block or inline code: 'ltr' (no line opens RTL),
+// 'rtl' (every line with a strong char opens RTL -- Hebrew prose that arrived in a
+// code fence) or 'mixed' (Hebrew comment lines next to code lines: each line then
+// takes its own direction).
+function codeTextMode(text) {
+    if (!text || !hasRTL(text)) return 'ltr';
+    var lines = text.split('\n'), r = 0, l = 0;
+    for (var i = 0; i < lines.length; i++) {
+        var d = firstStrong(lines[i]);
+        if (d === 'rtl') r++; else if (d === 'ltr') l++;
+    }
+    if (!r) return 'ltr';
+    return l ? 'mixed' : 'rtl';
 }
 
 // Classify a table cell's direction. A cell is RTL if it *contains* any RTL char
@@ -348,6 +416,9 @@ if (typeof module !== 'undefined' && module.exports) {
         firstStrong: firstStrong,
         rtlMajority: rtlMajority,
         latinFirstMixed: latinFirstMixed,
+        englishSentence: englishSentence,
+        findLatinIslands: findLatinIslands,
+        codeTextMode: codeTextMode,
         setLatinFirstEnabled: setLatinFirstEnabled,
         isLatinFirstEnabled: isLatinFirstEnabled,
         lineDir: lineDir,
