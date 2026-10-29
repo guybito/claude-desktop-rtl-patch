@@ -522,6 +522,38 @@ function codeTextMode(text) {
     return l ? 'mixed' : 'rtl';
 }
 
+// A short Latin label that ends in punctuation ("Cynet:", "Step 2:", "Defender (MDE):").
+// Bolded inside RTL text, claude.ai renders it as its own LTR island, which pins
+// the trailing punctuation to the RIGHT of the word. Without the island it follows
+// the RTL line and sits on the LEFT, where Hebrew readers expect it.
+// Must start with a Latin letter and end with a letter/digit or a balanced closing
+// bracket before the punctuation; edge neutrals like "C++" or "(x)" stay isolated.
+var LABEL_RE = /^[A-Za-z](?:[^\n]*[A-Za-z0-9)\]])?([:;,.!?]+)$/;
+function isLatinLabel(text) {
+    var t = (text || '').trim();
+    if (t.length < 2 || t.length > 80 || hasRTL(t)) return false;
+    if (!LABEL_RE.test(t)) return false;
+    var open = 0, sq = 0;
+    for (var i = 0; i < t.length; i++) {
+        var c = t[i];
+        if (c === '(') open++; else if (c === ')') open--;
+        else if (c === '[') sq++; else if (c === ']') sq--;
+        if (open < 0 || sq < 0) return false;
+    }
+    return open === 0 && sq === 0;
+}
+
+// Index in text where the trailing punctuation of a label starts when the char
+// before it is a neutral (")" or "]"): an LRM must be inserted there, or the
+// bracket would join the RTL punctuation run once the island is removed. -1 = none.
+function labelLrmIndex(text) {
+    var t = (text || '').replace(/\s+$/, '');
+    var m = /[:;,.!?]+$/.exec(t);
+    if (!m || m.index === 0) return -1;
+    var prev = t.charAt(m.index - 1);
+    return (prev === ')' || prev === ']') ? m.index : -1;
+}
+
 // Classify a table cell's direction. A cell is RTL if it *contains* any RTL char
 // (header labels often start with a Latin term yet belong to a Hebrew column, so
 // first-strong is too weak here). Neutral cells return null so they don't sway
@@ -973,10 +1005,50 @@ function majorityDir(dirs) {
             });
         }
 
+        // Latin labels ending in punctuation ("**Cynet:**" + Hebrew) inside an RTL block:
+        // claude.ai (and our own plaintext rule for managed children) isolates the run,
+        // so the colon renders on the word's right. Drop the isolation for these runs
+        // only, so the punctuation follows the RTL line (left). When a closing bracket
+        // precedes it ("Defender (MDE):") an LRM keeps the bracket with the Latin text.
+        // Independent of the Latin-first setting.
+        var LABEL_SEL = 'strong, b, em, i, u, mark, a, span';
+        var LABEL_FLAG = 'data-rtl-label';
+        var LRM = '\u200E';
+        function lastTextNode(el) {
+            var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null), n, last = null;
+            while ((n = w.nextNode())) { if (n.data.trim()) last = n; }
+            return last;
+        }
+        function processLabels(root) {
+            qsa(root, LABEL_SEL).forEach(function(el) {
+                if (el.hasAttribute(LABEL_FLAG)) return;
+                if (el.querySelector('code, kbd, samp, pre, br, img, svg, p, div, li, table, .katex, mjx-container, [' + ISLAND_FLAG + ']')) return;
+                var text = el.textContent || '';
+                if (!isLatinLabel(text)) return;
+                if (el.closest(EDITOR_SEL) || el.closest('pre, code, kbd, samp, .katex, mjx-container')) return;
+                var parent = el.parentElement;
+                if (!parent || getComputedStyle(parent).direction !== 'rtl') return;
+                // Only a run that is itself a bidi island needs this; an inner label of an
+                // already-handled label (strong > a) is covered by its outer one.
+                var ub = getComputedStyle(el).unicodeBidi;
+                if (ub !== 'plaintext' && ub !== 'isolate' && ub !== 'isolate-override') return;
+                el.setAttribute(LABEL_FLAG, '');
+                el.style.setProperty('unicode-bidi', 'normal', 'important');
+                var t = lastTextNode(el);
+                if (t) {
+                    var idx = labelLrmIndex(t.data);
+                    if (idx > 0 && t.data.charAt(idx - 1) !== LRM) {
+                        t.data = t.data.slice(0, idx) + LRM + t.data.slice(idx);
+                    }
+                }
+            });
+        }
+
         function processAll() {
             isolateMath(document.body);
             processText(document);
             processContainers(document.body);
+            processLabels(document.body);
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
@@ -1007,6 +1079,8 @@ function majorityDir(dirs) {
                 // with a Latin word ("FW <Hebrew> (ACCEPT)") render as a reversed LTR
                 // island. A stylesheet rule survives React rewriting inline styles.
                 ':is(p,li,h1,h2,h3,h4,h5,h6,blockquote,td,th,summary,dt,dd) :is(strong,b,em,i,u,s,mark,a,del,ins,sub,sup,small,abbr,cite,q,dfn):not(.ProseMirror *):not([contenteditable="true"] *){unicode-bidi:normal!important}',
+                // Latin labels (processLabels) keep their fix after React rewrites styles.
+                '[data-rtl-label]{unicode-bidi:normal!important}',
                 // Code mixing Hebrew comment lines with code lines: per-line direction.
                 '[data-rtl-codemix],[data-rtl-codemix] code{unicode-bidi:plaintext!important}',
                 // RTL: flip sidebar truncation gradient to fade the LEFT edge (issue #7).
@@ -1214,6 +1288,7 @@ function majorityDir(dirs) {
                             isolateMath(r);
                             processText(r);
                             processContainers(r);
+                            processLabels(r);
                             processTables(r);
                             forceCodeLTR(r);
                         });
@@ -3643,7 +3718,12 @@ function Install-PatchCore {
                 $NewCertBytes = $Cert.RawData
 
                 if ($NewCertBytes.Length -le $OldCertSize) {
-                    $Store.Add($Cert)
+                    # Trust a PUBLIC-ONLY copy: adding $Cert itself would carry its key-provider
+                    # link into Root, so the Root entry keeps reporting HasPrivateKey even
+                    # after the key is wiped below.
+                    $PubCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,$NewCertBytes)
+                    $PubCert.FriendlyName = "Claude_RTL_SelfSigned"
+                    $Store.Add($PubCert)
                     $ValidCertFound = $true
                     Write-Success "Generated certificate fits! ($($Config.Label), Size: $($NewCertBytes.Length) bytes, Hole: $OldCertSize bytes)"
                     break
@@ -3773,6 +3853,24 @@ function Install-PatchCore {
                 Write-Host "  * Run tools\claude-removal-diag.ps1 to locate and remove the" -ForegroundColor Cyan
                 Write-Host "    'Claude_RTL_SelfSigned' certificate and its key container." -ForegroundColor Cyan
                 Write-Host ""
+            }
+
+            # HYGIENE: every run mints a new cert. Drop the Root entries of earlier runs so
+            # only the cert that signed the current binaries stays trusted machine-wide.
+            $rootStore = $null
+            Try {
+                $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+                $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $stale = @($rootStore.Certificates | Where-Object {
+                    $_.Thumbprint -ne $Cert.Thumbprint -and
+                    ($_.FriendlyName -eq "Claude_RTL_SelfSigned" -or $_.Subject -eq $CertSubject)
+                })
+                foreach ($old in $stale) { $rootStore.Remove($old) }
+                if ($stale.Count -gt 0) { Write-Success "Removed $($stale.Count) stale RTL certificate(s) from the Root store." }
+            } Catch {
+                Write-Warn "Could not remove stale RTL certificates: $($_.Exception.Message)"
+            } Finally {
+                if ($rootStore) { $rootStore.Close() }
             }
 
         } else {

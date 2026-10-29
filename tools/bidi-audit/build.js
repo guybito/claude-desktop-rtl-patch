@@ -15,6 +15,13 @@ function assemble(corePath, payPath) {
   return pay.replace('/*__RTL_CORE__*/', () => core.trimEnd());
 }
 
+// Baseline "installed" = what the release channel (origin/main) ships, taken from git.
+const { execSync } = require('child_process');
+const baseRef = process.env.AUDIT_BASE || 'origin/main';
+for (const [src, dst] of [['src/rtl-core.js', 'installed-core.js'], ['src/rtl-payload.js', 'installed-payload.js']]) {
+  fs.writeFileSync(path.join(here, dst), execSync('git show ' + baseRef + ':' + src, { cwd: repo }));
+}
+
 const payloads = {
   upstream: assemble(path.join(here, 'upstream-core.js'), path.join(here, 'upstream-payload.js')),
   installed: assemble(path.join(here, 'installed-core.js'), path.join(here, 'installed-payload.js')),

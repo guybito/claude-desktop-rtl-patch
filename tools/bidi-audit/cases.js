@@ -39,6 +39,11 @@ var CASES = [
   { id: 'I15', cat: 'inline', title: 'מודגש לועזי שנגמר בנקודה באמצע משפט עברי',
     html: '<p>בחרו <strong>Settings.</strong> ואז שמרו.</p>', dir: 'rtl' },
 
+  { id: 'I16', cat: 'inline', title: 'מודגש: מוצר + סוגריים + נקודתיים',
+    html: '<p><strong>Microsoft Defender (MDE):</strong> זיהה את הקובץ.</p>', dir: 'rtl' },
+  { id: 'I17', cat: 'inline', title: 'הודעת משתמש עם מודגש לועזי + נקודתיים',
+    html: '<div class="user"><strong>Cynet:</strong> חסם את הקובץ</div>', dir: 'rtl' },
+
   // ---------- P: paragraph direction ----------
   { id: 'P1', cat: 'paragraph', title: 'פסקה שנפתחת במילה לועזית, רוב עברי',
     html: '<p>Cloudflare חוסם את הבוטים באתר כבר שבוע.</p>', dir: 'rtl' },
