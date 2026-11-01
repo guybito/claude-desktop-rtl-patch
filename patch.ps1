@@ -1052,6 +1052,43 @@ function majorityDir(dirs) {
             });
         }
 
+        // Code tab ("epitaxy") fences render inside a <diffs-container> custom element
+        // whose lines live in a shadow root: our stylesheet and DOM passes cannot reach
+        // them, and the fence wrapper carries a native dir="ltr". The fence keeps its
+        // full text in data-code-text, so the mode is decided from that and a sheet is
+        // adopted into the shadow root (adoptedStyleSheets survive the renderer
+        // rewriting the shadow content). The shadow root may attach after the fence
+        // appears, so a missing one is retried a few times.
+        var SHADOW_CSS = {
+            rtl: ':host{direction:rtl!important}pre,code,div{direction:rtl!important;text-align:right!important}',
+            mixed: 'pre,code,div{unicode-bidi:plaintext!important}'
+        };
+        var shadowSheets = {};
+        function shadowSheet(mode) {
+            if (!shadowSheets[mode]) {
+                var sh = new CSSStyleSheet();
+                sh.replaceSync(SHADOW_CSS[mode]);
+                shadowSheets[mode] = sh;
+            }
+            return shadowSheets[mode];
+        }
+        function processShadowCode(root, tries) {
+            if (typeof CSSStyleSheet === 'undefined' || !('adoptedStyleSheets' in Document.prototype)) return;
+            var retry = false;
+            qsa(root, '[data-code-text]').forEach(function(fence) {
+                var mode = codeTextMode(fence.getAttribute('data-code-text') || '');
+                var hosts = qsa(fence, '*').filter(function(n) { return n.shadowRoot; });
+                if (!hosts.length) { if (mode !== 'ltr') retry = true; return; }
+                hosts.forEach(function(h) {
+                    var sr = h.shadowRoot, own = [shadowSheets.rtl, shadowSheets.mixed];
+                    var kept = sr.adoptedStyleSheets.filter(function(s) { return own.indexOf(s) === -1; });
+                    sr.adoptedStyleSheets = mode === 'ltr' ? kept : kept.concat([shadowSheet(mode)]);
+                });
+            });
+            tries = tries || 0;
+            if (retry && tries < 5) setTimeout(function() { processShadowCode(root, tries + 1); }, 300);
+        }
+
         function processAll() {
             isolateMath(document.body);
             processText(document);
@@ -1060,6 +1097,7 @@ function majorityDir(dirs) {
             processTables(document.body);
             processInput();
             forceCodeLTR(document.body);
+            processShadowCode(document.body);
         }
 
         function injectStyles() {
@@ -1238,6 +1276,17 @@ function majorityDir(dirs) {
                         ' {direction:' + cs.direction + '; unicode-bidi:' + cs.unicodeBidi + '; text-align:' + cs.textAlign +
                         '; white-space:' + cs.whiteSpace + '; display:' + cs.display + '}');
                 }
+                // Shadow roots in the chain (Code tab fences): their content is what renders.
+                for (var se = start.nodeType === 1 ? start : start.parentElement; se; se = se.parentElement) {
+                    var hosts = [se].concat(Array.prototype.slice.call(se.querySelectorAll('*'))).filter(function(n) { return n.shadowRoot; });
+                    if (hosts.length) {
+                        var sr = hosts[0].shadowRoot;
+                        out.push('--- shadow root of <' + hosts[0].tagName.toLowerCase() + '> (sheets: ' + sr.adoptedStyleSheets.length + ') ---\n' +
+                            sr.innerHTML.replace(/ class="([^"]{0,60})[^"]*"/g, ' class="$1"').slice(0, 3000));
+                        break;
+                    }
+                    if (se.matches('[data-code-text], [role="article"]')) break;
+                }
                 var here = start.nodeType === 1 ? start : start.parentElement;
                 var blk = here && (here.closest('pre') || here.closest('[class*="code"]') ||
                     here.closest('p, li, td, th, blockquote, h1, h2, h3, h4, h5, h6') || here.closest('div'));
@@ -1346,6 +1395,7 @@ function majorityDir(dirs) {
                             processLabels(r);
                             processTables(r);
                             forceCodeLTR(r);
+                            processShadowCode(r);
                         });
                         processInput();
                     } else {
