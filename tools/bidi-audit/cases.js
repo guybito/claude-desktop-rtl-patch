@@ -152,6 +152,10 @@ var CASES = [
   { id: 'T2', cat: 'table', title: 'תא עם מודגש שנפתח באנגלית',
     html: '<div class="tw"><table><thead><tr><th>שדה</th><th>ערך</th></tr></thead><tbody><tr><td>פעולה</td><td><strong>FW אישר (ACCEPT)</strong></td></tr></tbody></table></div>', dir: 'rtl' },
 
+  { id: 'T3', cat: 'table', title: 'תא: שני מונחים באנגלית שמופרדים בנקודה (מילון מונחים)',
+    html: '<div class="tw"><table><thead><tr><th>מונח</th><th>הסבר קצר</th></tr></thead><tbody><tr><td>SSL VPN (tunnel / web)</td><td>ה-VPN של FortiGate. tunnel: חיבור מלא עם כתובת ממאגר ה-VPN. web: רק דף כניסה בדפדפן, בלי מנהרה ובלי כתובת</td></tr></tbody></table></div>', dir: 'rtl',
+    oracle: '<div class="tw" dir="rtl"><table dir="rtl"><thead><tr><th>מונח</th><th>הסבר קצר</th></tr></thead><tbody><tr><td dir="ltr">SSL VPN (tunnel / web)</td><td dir="rtl">ה-VPN של <bdi>FortiGate</bdi>. tunnel: חיבור מלא עם כתובת ממאגר ה-<bdi>VPN</bdi>. web: רק דף כניסה בדפדפן, בלי מנהרה ובלי כתובת</td></tr></tbody></table></div>' },
+
   // ---------- H: headings ----------
   { id: 'H1', cat: 'heading', title: 'כותרת שנפתחת באנגלית',
     html: '<h3>Rapid7 – סיכום החקירה</h3>', dir: 'rtl' },

@@ -310,10 +310,18 @@ function findMathRanges(text) {
 var LATIN_SYMBOL_RE = /(^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*[+#]+)(?![A-Za-z0-9+#])/g;
 var LATIN_BEFORE_COUNT_RE = /(^|[^A-Za-z0-9.\-_\u0590-\u05FF]|[\u0590-\u05FF]-)([A-Za-z][\w.\-]*(?:[ \t]+[A-Za-z][\w.\-]*)*)(?=[ \t]+\d+(?:[.,]\d+)*%?[ \t]+[\u0590-\u05FF]{2})/g;
 
+// Two Latin runs split only by sentence punctuation ("... FortiGate. tunnel: ...")
+// merge into one LTR run in RTL text, so the second is read first. Isolating the
+// first run (punctuation left outside) restores the order. Only in text that
+// carries RTL: plain English paragraphs are left untouched.
+var LATIN_BEFORE_SENTENCE_RE = /(^|[^A-Za-z0-9.\-_\u0590-\u05FF]|[\u0590-\u05FF]-)([A-Za-z][\w\-]*(?:[ \t]+[A-Za-z][\w\-]*)*)(?=[.;:!?]+[ \t]+[A-Za-z])/g;
+
 function findLatinIslands(text) {
     var ranges = [];
     if (!text || !/[A-Za-z]/.test(text)) return ranges;
-    [LATIN_SYMBOL_RE, LATIN_BEFORE_COUNT_RE].forEach(function (re) {
+    var res = [LATIN_SYMBOL_RE, LATIN_BEFORE_COUNT_RE];
+    if (hasRTL(text)) res.push(LATIN_BEFORE_SENTENCE_RE);
+    res.forEach(function (re) {
         var m;
         re.lastIndex = 0;
         while ((m = re.exec(text)) !== null) {

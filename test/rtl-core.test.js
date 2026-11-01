@@ -281,6 +281,10 @@ test('findLatinIslands: trailing symbols and a Latin word before a Hebrew count'
     assert.deepStrictEqual(isl('x+y=5'), []);
     assert.deepStrictEqual(isl('החוק (Rule ID 4521, ראו למטה) פעיל.'), []);
     assert.deepStrictEqual(isl('נמצאו 126 כתובות IP'), []);
+    // two Latin runs split by sentence punctuation, only inside RTL text
+    assert.deepStrictEqual(isl('ה-VPN של FortiGate. tunnel: חיבור מלא'), ['FortiGate']);
+    assert.deepStrictEqual(isl('Hello world. This is English.'), []);
+    assert.deepStrictEqual(isl('בדקתי את Rapid7. הוא סופר'), []);
 });
 
 test('segmentText: Latin islands become isolated segments, arithmetic still wins', () => {

@@ -287,7 +287,7 @@
                     // Cheap pre-filter: a LaTeX hint ($ or \) OR a numeric hint (digit AND operator).
                     var hasTex = v.indexOf('$') !== -1 || v.indexOf('\\') !== -1;
                     var hasNum = MATH_DIGIT_RE.test(v) && MATH_OP_RE.test(v);
-                    var hasLat = /[A-Za-z][+#]|[A-Za-z]\w*[ \t]+\d/.test(v);
+                    var hasLat = /[A-Za-z][+#]|[A-Za-z]\w*[ \t]+\d|[A-Za-z][.;:!?]+[ \t]+[A-Za-z]/.test(v);
                     if (!hasTex && !hasNum && !hasLat) return NodeFilter.FILTER_REJECT;
                     var p = node.parentElement;
                     if (!p) return NodeFilter.FILTER_REJECT;
