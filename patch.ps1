@@ -1212,6 +1212,43 @@ function majorityDir(dirs) {
             }
             processAll();
 
+            // Diagnostics: Ctrl+Alt+Shift+R copies the DOM shape under the mouse (tags,
+            // classes, dir and the computed bidi styles of each ancestor, plus the
+            // nearest block's HTML), so a rendering bug in a surface we cannot open
+            // (e.g. the Code tab) can be reproduced in tools/bidi-audit.
+            var lastHover = null;
+            document.addEventListener('mousemove', function(e) { lastHover = e.target; }, true);
+            document.addEventListener('keydown', function(e) {
+                if (!(e.ctrlKey && e.altKey && e.shiftKey && e.code === 'KeyR') || !lastHover) return;
+                var out = [], el = lastHover.nodeType === 1 ? lastHover : lastHover.parentElement;
+                for (var i = 0; el && el !== document.documentElement && i < 14; i++, el = el.parentElement) {
+                    var cs = getComputedStyle(el);
+                    out.push(el.tagName.toLowerCase() +
+                        (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 8).join('.') : '') +
+                        ['dir', 'role', 'contenteditable', MANAGED_FLAG, RTL_SPLIT_FLAG, CODE_MIX_FLAG, 'style'].map(function(a) {
+                            return el.hasAttribute(a) ? ' [' + a + '="' + String(el.getAttribute(a)).slice(0, 80) + '"]' : '';
+                        }).join('') +
+                        ' {direction:' + cs.direction + '; unicode-bidi:' + cs.unicodeBidi + '; text-align:' + cs.textAlign +
+                        '; white-space:' + cs.whiteSpace + '; display:' + cs.display + '}');
+                }
+                var blk = (lastHover.nodeType === 1 ? lastHover : lastHover.parentElement);
+                blk = blk && blk.closest('pre, p, li, td, th, blockquote, h1, h2, h3, h4, h5, h6, div');
+                var report = '[Claude RTL debug] ' + location.href + '\n' + out.join('\n') +
+                    '\n--- block HTML ---\n' + (blk ? blk.outerHTML.slice(0, 4000) : '(none)');
+                e.preventDefault();
+                var note = function(msg) {
+                    var t = document.createElement('div');
+                    t.textContent = msg;
+                    t.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:2147483647;background:#222;color:#fff;padding:6px 10px;border-radius:6px;font:13px sans-serif';
+                    document.body.appendChild(t);
+                    setTimeout(function() { t.remove(); }, 2000);
+                };
+                try {
+                    navigator.clipboard.writeText(report).then(function() { note('RTL debug copied'); },
+                        function() { console.log(report); note('RTL debug: clipboard refused, see console'); });
+                } catch (err) { console.log(report); }
+            }, true);
+
             // Input box live direction switching
             document.addEventListener('input', function(e) {
                 var t = e.target;
