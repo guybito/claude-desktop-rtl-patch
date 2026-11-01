@@ -1216,11 +1216,18 @@ function majorityDir(dirs) {
             // classes, dir and the computed bidi styles of each ancestor, plus the
             // nearest block's HTML), so a rendering bug in a surface we cannot open
             // (e.g. the Code tab) can be reproduced in tools/bidi-audit.
-            var lastHover = null;
-            document.addEventListener('mousemove', function(e) { lastHover = e.target; }, true);
+            var lastHover = null, lastX = 0, lastY = 0;
+            document.addEventListener('mousemove', function(e) { lastHover = e.target; lastX = e.clientX; lastY = e.clientY; }, true);
             document.addEventListener('keydown', function(e) {
                 if (!(e.ctrlKey && e.altKey && e.shiftKey && e.code === 'KeyR') || !lastHover) return;
-                var out = [], el = lastHover.nodeType === 1 ? lastHover : lastHover.parentElement;
+                // Start from the text under the cursor: the hovered element is often a
+                // row wrapper or an overlay, not the text itself.
+                var start = lastHover;
+                try {
+                    var cr = document.caretRangeFromPoint && document.caretRangeFromPoint(lastX, lastY);
+                    if (cr && cr.startContainer) start = cr.startContainer;
+                } catch (err) {}
+                var out = [], el = start.nodeType === 1 ? start : start.parentElement;
                 for (var i = 0; el && el !== document.documentElement && i < 14; i++, el = el.parentElement) {
                     var cs = getComputedStyle(el);
                     out.push(el.tagName.toLowerCase() +
@@ -1231,10 +1238,13 @@ function majorityDir(dirs) {
                         ' {direction:' + cs.direction + '; unicode-bidi:' + cs.unicodeBidi + '; text-align:' + cs.textAlign +
                         '; white-space:' + cs.whiteSpace + '; display:' + cs.display + '}');
                 }
-                var blk = (lastHover.nodeType === 1 ? lastHover : lastHover.parentElement);
-                blk = blk && blk.closest('pre, p, li, td, th, blockquote, h1, h2, h3, h4, h5, h6, div');
+                var here = start.nodeType === 1 ? start : start.parentElement;
+                var blk = here && (here.closest('pre') || here.closest('[class*="code"]') ||
+                    here.closest('p, li, td, th, blockquote, h1, h2, h3, h4, h5, h6') || here.closest('div'));
+                // Long utility class lists would crowd out the structure; keep their start.
+                var html = blk ? blk.outerHTML.replace(/ class="([^"]{0,60})[^"]*"/g, ' class="$1"') : '(none)';
                 var report = '[Claude RTL debug] ' + location.href + '\n' + out.join('\n') +
-                    '\n--- block HTML ---\n' + (blk ? blk.outerHTML.slice(0, 4000) : '(none)');
+                    '\n--- block HTML ---\n' + html.slice(0, 6000);
                 e.preventDefault();
                 var note = function(msg) {
                     var t = document.createElement('div');
