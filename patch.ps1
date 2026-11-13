@@ -11,8 +11,20 @@ param(
     [string]$TrustedPubKey,
     [Alias('ArabicScriptFont')]
     [string]$CustomFont,
-    [string]$CustomFontScope
+    [string]$CustomFontScope,
+    # Set only by the protected repair runner (repair.ps1, as SYSTEM): no window, no
+    # prompts, no npx, no Claude launch, and the exact Claude folder to patch.
+    [switch]$Silent,
+    [string]$ClaudeDir,
+    # Installs the update manager (watcher, protected repair task, prompt, policy)
+    # without touching Claude itself. Needs an elevated PowerShell.
+    [switch]$InstallUpdateManager
 )
+
+# Release build number. repair.ps1 refuses a downloaded patch.ps1 whose build is
+# lower than the verified local copy (rollback protection). Bump on every release.
+$script:PatchBuild = 2026111301
+if ($Silent) { $Auto = $true }
 
 # Env-var fallback for `irm | iex` invocations where param binding is not possible.
 if (-not $Auto -and $env:CLAUDE_RTL_AUTO -eq '1') { $Auto = $true }
@@ -29,6 +41,10 @@ if ($TrustedPubKey) { $env:CLAUDE_RTL_TRUSTED_PUBKEY = $TrustedPubKey }
 # Supports both file execution and irm|iex piped execution
 # -----------------------------------------------------------------------------
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $IsAdmin -and ($Silent -or $InstallUpdateManager)) {
+    Write-Host "This mode needs an elevated PowerShell (Run as administrator)." -ForegroundColor Red
+    Exit 1
+}
 if (-not $IsAdmin) {
     Write-Host "Requesting Administrator privileges..." -ForegroundColor Yellow
     # -CustomFont/-CustomFontScope would be lost across the update.ps1/install.ps1
@@ -2306,115 +2322,24 @@ function Save-UpdateScript {
 
         # Single-quoted here-string: $ signs are preserved literally for runtime evaluation.
         $updateBody = @'
-# Claude RTL Patch -- verified local updater.
+# Claude RTL Patch -- "Update Claude RTL" shortcut (update.ps1).
 #
-# Loaded by the desktop "Update Claude RTL" shortcut. Uses the pubkey pinned
-# at install time to verify patch.ps1 against the maintainer's offline private
-# key, then elevates via UAC. install.ps1 is intentionally NOT used here --
-# a compromised GitHub repo cannot influence this path.
-$ErrorActionPreference = "Continue"
-try {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-} catch { }
-
-$stateDir      = Join-Path $env:ProgramData "ClaudeRtlPatch"
-$pubkeyPinFile = Join-Path $stateDir "trusted-pubkey.b64"
-$repoBase      = "https://raw.githubusercontent.com/guybito/claude-desktop-rtl-patch/main"
-$patchUrl      = "$repoBase/patch.ps1"
-$sigUrl        = "$repoBase/patch.ps1.sig"
-
-function Pause-ThenExit($code) {
-    Write-Host ""
-    Write-Host "Press Enter to close this window..." -ForegroundColor DarkGray
-    $null = Read-Host
-    Exit $code
+# Asks Windows (one UAC prompt) to run the protected repair runner with -Refresh.
+# That runner, from the admin-only ProgramData folder, downloads patch.ps1 and its
+# signature, verifies them against the pinned public key, refuses older builds,
+# stores the verified copy there and applies it. Nothing is written to %TEMP% and
+# nothing downloaded is executed by this unelevated script.
+#
+$sys    = [Environment]::GetFolderPath('System')
+$repair = Join-Path $env:ProgramData 'ClaudeRtlPatch\repair.ps1'
+if (-not (Test-Path -LiteralPath $repair)) {
+    Write-Host "The protected repair runner is missing: $repair" -ForegroundColor Red
+    Write-Host "Install the update manager once (elevated): patch.ps1 -InstallUpdateManager" -ForegroundColor Yellow
+    Write-Host "Press Enter to close..."; $null = Read-Host; exit 1
 }
-
-Write-Host ""
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "  Claude RTL Patch -- verified update                  " -ForegroundColor Cyan
-Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host ""
-
-if (-not (Test-Path $pubkeyPinFile)) {
-    Write-Host "No pinned pubkey at $pubkeyPinFile." -ForegroundColor Red
-    Write-Host "This computer has not bootstrapped a trust anchor yet." -ForegroundColor Yellow
-    Write-Host "Run the manual installer once to fix this:" -ForegroundColor Yellow
-    Write-Host "  irm https://raw.githubusercontent.com/guybito/claude-desktop-rtl-patch/main/install.ps1 | iex" -ForegroundColor Cyan
-    Pause-ThenExit 1
-}
-
-try {
-    $pubB64 = (Get-Content $pubkeyPinFile -Raw).Trim()
-    if (-not $pubB64) { throw "Pinned pubkey file is empty." }
-    $pubJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pubB64))
-    $pubObj  = $pubJson | ConvertFrom-Json
-    $params = New-Object System.Security.Cryptography.RSAParameters
-    $params.Modulus  = [Convert]::FromBase64String($pubObj.Modulus)
-    $params.Exponent = [Convert]::FromBase64String($pubObj.Exponent)
-    $rsa = [System.Security.Cryptography.RSA]::Create()
-    $rsa.ImportParameters($params)
-} catch {
-    Write-Host "Pinned pubkey is unreadable: $($_.Exception.Message)" -ForegroundColor Red
-    Pause-ThenExit 1
-}
-
-Write-Host "Downloading patch.ps1 + signature..." -ForegroundColor Gray
-try {
-    $wc = New-Object System.Net.WebClient
-    $patchBytes = $wc.DownloadData($patchUrl)
-    $sigB64     = $wc.DownloadString($sigUrl).Trim()
-} catch {
-    Write-Host "Network error: $($_.Exception.Message)" -ForegroundColor Red
-    Pause-ThenExit 1
-}
-
-try {
-    $sigBytes = [Convert]::FromBase64String($sigB64)
-} catch {
-    Write-Host "Downloaded signature is not valid base64. Aborting." -ForegroundColor Red
-    Pause-ThenExit 1
-}
-
-$valid = $rsa.VerifyData($patchBytes, $sigBytes,
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-
-if (-not $valid) {
-    Write-Host ""
-    Write-Host "================================================================" -ForegroundColor Red
-    Write-Host "  SIGNATURE VERIFICATION FAILED -- REFUSING TO RUN patch.ps1     " -ForegroundColor Red
-    Write-Host "================================================================" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "patch.ps1 does not match the pinned maintainer key." -ForegroundColor Yellow
-    Write-Host "Possible causes:" -ForegroundColor Yellow
-    Write-Host "  * The GitHub repository was compromised." -ForegroundColor Yellow
-    Write-Host "  * The maintainer rotated keys (requires a manual re-install)." -ForegroundColor Yellow
-    Write-Host "  * A proxy is intercepting traffic." -ForegroundColor Yellow
-    Pause-ThenExit 1
-}
-
-# Strip incoming BOM, re-add UTF-8 BOM on write (PS 5.1 needs it to parse patch.ps1).
-$tmpFile = Join-Path $env:TEMP "claude_rtl_patch.ps1"
-$content = [System.Text.Encoding]::UTF8.GetString($patchBytes)
-if ($content.Length -gt 0 -and $content[0] -eq [char]0xFEFF) { $content = $content.Substring(1) }
-[System.IO.File]::WriteAllText($tmpFile, $content, [System.Text.UTF8Encoding]::new($true))
-
-Write-Host "Patch verified ($($patchBytes.Length) bytes). Elevating..." -ForegroundColor Green
-
-# Pass the pubkey as a -TrustedPubKey PARAMETER (env vars don't survive the UAC
-# boundary) so the child's Save-TrustedPubkey sees the same anchor. AUTO=1 runs
-# Install-Patch directly instead of the menu.
-$env:CLAUDE_RTL_AUTO = '1'
-
-# Elevate via UAC. Auto mode pauses on Read-Host at the end so the log is readable.
-Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Verb RunAs `
-    -ArgumentList @(
-        '-NoProfile','-ExecutionPolicy','Bypass',
-        '-File',$tmpFile,'-Auto','-TrustedPubKey',$pubB64
-    )
+$ps = Join-Path $sys 'WindowsPowerShell\v1.0\powershell.exe'
+Start-Process -FilePath $ps -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', "`"$repair`"", '-Refresh', '-Force')
 '@
 
         # PS 5.1 needs UTF-8 with BOM to parse Unicode text correctly.
@@ -2427,6 +2352,14 @@ Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.e
 }
 
 function Find-ClaudeDir {
+    # The protected repair runner names the exact folder (it runs as SYSTEM, where
+    # Get-AppxPackage without -AllUsers sees nothing). Only the Anthropic-signed
+    # Store package folder is accepted.
+    if ($ClaudeDir) {
+        if ($ClaudeDir -match '^[A-Za-z]:\\Program Files\\WindowsApps\\Claude_\d+(\.\d+){1,3}_x64__pzs8sxrjxfjjc$' -and
+            (Test-Path -LiteralPath $ClaudeDir)) { return $ClaudeDir }
+        throw "Refusing -ClaudeDir '$ClaudeDir': not the Claude Store package folder."
+    }
     $pkg = Get-AppxPackage | Where-Object { $_.Name -like '*Claude*' -and $_.InstallLocation -like '*WindowsApps*' } | Select-Object -First 1
     if (-not $pkg) {
         # UAC elevation can switch identity: elevating with a separate admin account
@@ -2906,6 +2839,10 @@ function Start-ClaudeServices {
         Write-Warn "cowork-svc service not found via WMI."
     }
 
+    if ($Silent) {
+        Write-Log "Silent mode: Claude is reopened by the update manager, not here."
+        return
+    }
     Write-Log "Launching Claude Desktop..."
     Try {
         $pkg = Get-AppxPackage | Where-Object { $_.Name -like '*Claude*' } | Select-Object -First 1
@@ -3054,6 +2991,11 @@ function Set-AsarIntegrityFuseOff {
 }
 
 function Invoke-FuseFlip {
+    if ($Silent) {
+        # npx downloads code from npm; never do that unattended with admin rights.
+        Write-Warn "Fuse fallback is disabled in silent mode (it would download from npm). Run the 'Update Claude RTL' shortcut instead."
+        return $false
+    }
     param([Parameter(Mandatory)][string]$ExePath)
 
     if (-not (Test-Path -LiteralPath $ExePath)) {
@@ -3156,271 +3098,1018 @@ function Create-UpdateShortcut {
 # heuristic once the body downloads patch.ps1). The watcher only MONITORS for new
 # claude.exe versions; when it fires it fetches patch.ps1 LIVE and runs THAT.
 # -----------------------------------------------------------------------------
-function Save-WatcherScript {
-    try {
-        if (-not (Protect-RtlStateDir)) {
-            Write-Warn "State dir could not be secured; refusing to write the auto-update watcher."
-            return
-        }
-        $watcherPath = Join-Path $global:RtlStateDir 'watcher.ps1'
+function Save-WatcherScript { Save-ManagerComponents }
 
-        # Single-quoted here-string: $ signs are preserved literally for runtime evaluation inside the watcher.
-        $watcherBody = @'
-$ErrorActionPreference = "Continue"
-# Scheduled Task PowerShell defaults to TLS 1.0; GitHub needs 1.2.
-try {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-} catch { }
-$stateDir       = Join-Path $env:ProgramData "ClaudeRtlPatch"
-$stateFile      = Join-Path $stateDir "state.json"
-$logFile        = Join-Path $stateDir "watcher.log"
-$lastActionFile = Join-Path $stateDir "last-action.txt"
-$pubkeyPinFile  = Join-Path $stateDir "trusted-pubkey.b64"
-# ProgramData files written by the elevated installer aren't writable by a standard
-# user, so an unelevated watcher (#34) can't append the log. Probe for append access
-# and, only on access-denied, move the writable artifacts (log + throttle) to the
-# user's LocalAppData; state.json and the pubkey pin stay in ProgramData (read-only).
-try {
-    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-    $probe = [System.IO.File]::Open($logFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
-    $probe.Close()
-} catch [System.UnauthorizedAccessException] {
-    try {
-        $userStateDir = Join-Path $env:LOCALAPPDATA "ClaudeRtlPatch"
-        if (-not (Test-Path $userStateDir)) { New-Item -ItemType Directory -Path $userStateDir -Force | Out-Null }
-        $logFile        = Join-Path $userStateDir "watcher.log"
-        $lastActionFile = Join-Path $userStateDir "last-action.txt"
-    } catch {}
-} catch {}
-# The watcher fetches patch.ps1 + patch.ps1.sig directly and verifies them with the
-# locally-pinned pubkey. The unsigned install.ps1 is never used, so the only trusted
-# network artifact is patch.ps1, validated byte-for-byte against the offline key.
-$repoBase       = "https://raw.githubusercontent.com/guybito/claude-desktop-rtl-patch/main"
-$patchUrl       = "$repoBase/patch.ps1"
-$sigUrl         = "$repoBase/patch.ps1.sig"
+# The update-manager scripts, embedded from src/components by tools/build-payload.ps1.
+# They are written into the admin-only state dir, so only an elevated process can
+# change what the scheduled tasks run.
+function Get-ComponentBody([string]$Name) {
+    switch ($Name) {
+        'watcher' { return @'
+# --- CLAUDE RTL COMPONENT watcher START ---
+# Claude RTL Patch -- watcher and update manager (watcher.ps1).
+#
+# Runs at logon as the signed-in user WITHOUT admin rights (scheduled task
+# "ClaudeRtlPatchWatcher", RunLevel Limited). Two jobs:
+#   1. When a new claude.exe version starts and it is not RTL-patched yet, start the
+#      protected "ClaudeRtlPatchRepair" task (SYSTEM). That task takes no input and
+#      only runs the locally verified patch.ps1, so nothing here can steer it.
+#   2. Update manager. Claude's own updater is switched off by policy because on the
+#      MSIX build it freezes the app after downloading an update. Instead, every hour
+#      this checks Anthropic's release feed; when a newer Claude exists it asks the
+#      user: update now / when all sessions are finished / at a set time / tomorrow.
+#      Before any update it checks that no Claude Code session is working, closes
+#      every Claude profile, installs the update, has the RTL re-applied and reopens
+#      the profiles that were open. It also unsticks an update that Windows left
+#      waiting while Claude froze.
+#
+# Text shown to the user is Hebrew and appears only inside (Heb '...') calls; the build
+# turns those characters into \u escapes so patch.ps1 stays ASCII.
 
-function Write-WLog($msg) {
+$ErrorActionPreference = 'Continue'
+
+$script:StateDir     = Join-Path $env:ProgramData 'ClaudeRtlPatch'
+$script:StateFile    = Join-Path $script:StateDir 'state.json'
+$script:RepairStatus = Join-Path $script:StateDir 'repair-status.json'
+$script:PromptScript = Join-Path $script:StateDir 'update-prompt.ps1'
+$script:UserDir      = Join-Path $env:LOCALAPPDATA 'ClaudeRtlPatch'
+$script:UserState    = Join-Path $script:UserDir 'update-manager.json'
+$script:ChoiceFile   = Join-Path $script:UserDir 'update-choice.json'
+$script:LogFile      = Join-Path $script:UserDir 'watcher.log'
+$script:RepairTask   = 'ClaudeRtlPatchRepair'
+$script:FeedUrl      = 'https://api.anthropic.com/api/desktop/win32/x64/msix/latest'
+$script:CheckEveryMin      = 60
+$script:RepromptAfterHours = 4
+$script:QuietMinutes       = 10     # no Claude Code transcript written for this long
+$script:BusyCpuSeconds     = 1.5    # CPU used by session processes in the sample window
+$script:CpuSampleSeconds   = 15
+$script:StuckLogMinutes    = 5
+$script:LauncherVbs  = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Claude-Launcher.vbs'
+$script:TranscriptRoots = @(Join-Path $env:USERPROFILE '.claude\projects')
+
+function Heb([string]$s) { return [regex]::Unescape($s) }
+
+function Write-WLog([string]$msg) {
     try {
-        if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-        if ((Test-Path $logFile) -and (Get-Item $logFile).Length -gt 1MB) {
-            Move-Item $logFile "$logFile.old" -Force
+        if (-not (Test-Path $script:UserDir)) { New-Item -ItemType Directory -Path $script:UserDir -Force | Out-Null }
+        if ((Test-Path $script:LogFile) -and (Get-Item $script:LogFile).Length -gt 1MB) {
+            Move-Item $script:LogFile "$script:LogFile.old" -Force
         }
-        "$([DateTime]::Now.ToString('o'))  $msg" | Out-File -Append -FilePath $logFile -Encoding UTF8
+        "$([DateTime]::Now.ToString('o'))  $msg" | Out-File -Append -FilePath $script:LogFile -Encoding UTF8
     } catch {}
 }
 
-function Get-VerFromPath($p) {
-    if (-not $p) { return $null }
-    $cur = $p
-    for ($i = 0; $i -lt 4 -and $cur; $i++) {
-        $leaf = Split-Path -Leaf $cur
-        if ($leaf -match '^Claude_(\d+(?:\.\d+){1,3})_') {
-            try { return [Version]$matches[1] } catch { return $null }
-        }
-        $cur = Split-Path -Parent $cur
-    }
+# ---------------------------------------------------------------------------
+# Side effects behind one table, so tests can replace each of them.
+# ---------------------------------------------------------------------------
+$script:Deps = @{
+    Now               = { Get-Date }
+    GetInstalledVer   = { Get-InstalledClaudeVersion }
+    GetFeed           = { Invoke-RestMethod -Uri $script:FeedUrl -UseBasicParsing -TimeoutSec 20 }
+    NewestTranscript  = { Get-NewestTranscriptTime }
+    SessionCpu        = { Measure-SessionCpu }
+    ClaudeMainProcs   = { Get-ClaudeMainProcesses }
+    ShowPrompt        = { param($new, $cur) Show-UpdatePrompt $new $cur }
+    Toast             = { param($title, $body) Show-Toast $title $body }
+    StopClaude        = { Stop-AllClaude }
+    AddPackage        = { param($url) Add-AppxPackage -Path $url -ForceApplicationShutdown -ErrorAction Stop }
+    RunRepair         = { Invoke-RepairTask }
+    StartProfiles     = { param($profiles) Start-ClaudeProfiles $profiles }
+    StuckSignal       = { Test-UpdateStuck }
+    Sleep             = { param($s) Start-Sleep -Seconds $s }
+}
+
+# ---------------------------------------------------------------------------
+# Versions and the release feed
+# ---------------------------------------------------------------------------
+function ConvertTo-Version([string]$Text) {
+    if (-not $Text -or $Text -notmatch '^\d+(\.\d+){1,3}$') { return $null }
+    $parts = @($Text.Split('.'))
+    while ($parts.Count -lt 4) { $parts += '0' }
+    return [version]($parts[0..3] -join '.')
+}
+
+function Get-InstalledClaudeVersion {
+    $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstallLocation -like '*\WindowsApps\Claude_*' } |
+        Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+    if ($pkg) { return [version]$pkg.Version }
     return $null
 }
 
-function Show-Toast($title, $body) {
+# Accepts only the shape Anthropic's feed returns, with the download on
+# downloads.claude.ai over HTTPS for exactly that version. Anything else is ignored.
+function ConvertFrom-Feed($Obj) {
+    if (-not $Obj) { return $null }
+    $ver = "$($Obj.version)"
+    $url = "$($Obj.url)"
+    if ($ver -notmatch '^\d+\.\d+\.\d+$') { return $null }
+    $esc = [regex]::Escape($ver)
+    if ($url -notmatch "^https://downloads\.claude\.ai/releases/win32/x64/$esc/Claude-[0-9a-f]{40}\.msix$") { return $null }
+    return @{ Version = (ConvertTo-Version $ver); Label = $ver; Url = $url }
+}
+
+# ---------------------------------------------------------------------------
+# User state (LocalAppData; unprivileged on purpose)
+# ---------------------------------------------------------------------------
+function Read-ManagerState {
+    $default = @{ pendingVersion = $null; pendingUrl = $null; mode = $null; at = $null; snoozeUntil = $null;
+                  promptedAt = $null; lastCheck = $null; busyNotified = $false; lastResult = $null }
+    if (-not (Test-Path -LiteralPath $script:UserState)) { return $default }
     try {
-        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
-        [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime]
-        $safeTitle = [System.Security.SecurityElement]::Escape($title)
-        $safeBody  = [System.Security.SecurityElement]::Escape($body)
-        $xmlStr = "<toast><visual><binding template='ToastGeneric'><text>$safeTitle</text><text>$safeBody</text></binding></visual></toast>"
+        $o = Get-Content -LiteralPath $script:UserState -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($k in @($default.Keys)) { if ($o.PSObject.Properties[$k]) { $default[$k] = $o.$k } }
+    } catch { Write-WLog "State unreadable, starting fresh: $($_.Exception.Message)" }
+    return $default
+}
+
+function Save-ManagerState($State) {
+    try {
+        if (-not (Test-Path $script:UserDir)) { New-Item -ItemType Directory -Path $script:UserDir -Force | Out-Null }
+        $State | ConvertTo-Json | Set-Content -LiteralPath $script:UserState -Encoding UTF8
+    } catch { Write-WLog "State save failed: $($_.Exception.Message)" }
+}
+
+# Applies the answer the prompt window left behind, then removes it.
+function Merge-PromptChoice($State) {
+    if (-not (Test-Path -LiteralPath $script:ChoiceFile)) { return $State }
+    try {
+        $c = Get-Content -LiteralPath $script:ChoiceFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ("$($c.version)" -eq "$($State.pendingVersion)" -and "$($c.mode)" -in @('now', 'idle', 'at', 'snooze')) {
+            $State.mode = "$($c.mode)"
+            $State.at = $c.at
+            $State.snoozeUntil = $c.snoozeUntil
+            $State.busyNotified = $false
+            Write-WLog "User chose '$($State.mode)' for Claude $($State.pendingVersion)."
+        }
+    } catch { Write-WLog "Prompt answer unreadable: $($_.Exception.Message)" }
+    Remove-Item -LiteralPath $script:ChoiceFile -Force -ErrorAction SilentlyContinue
+    return $State
+}
+
+function ConvertTo-Date($Value) {
+    if (-not $Value) { return $null }
+    try { return [datetime]::Parse("$Value", [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind) } catch { return $null }
+}
+
+# ---------------------------------------------------------------------------
+# Are Claude Code sessions working right now?
+# ---------------------------------------------------------------------------
+function Get-NewestTranscriptTime {
+    $newest = $null
+    foreach ($root in $script:TranscriptRoots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $f = Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($f -and (-not $newest -or $f.LastWriteTime -gt $newest)) { $newest = $f.LastWriteTime }
+    }
+    return $newest
+}
+
+# CPU seconds used during the sample window by Claude Code processes and every
+# process they started (shells, builds, tests, MCP servers).
+function Measure-SessionCpu {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $roots = @($all | Where-Object { $_.Name -eq 'claude.exe' -and $_.ExecutablePath -like '*\claude-code\*' })
+    if ($roots.Count -eq 0) { return 0.0 }
+    $ids = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($r in $roots) { [void]$ids.Add([int]$r.ProcessId) }
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($p in $all) {
+            if ($ids.Contains([int]$p.ParentProcessId) -and $ids.Add([int]$p.ProcessId)) { $grew = $true }
+        }
+    }
+    $cpu = {
+        $sum = 0.0
+        foreach ($id in $ids) { $p = Get-Process -Id $id -ErrorAction SilentlyContinue; if ($p) { $sum += $p.TotalProcessorTime.TotalSeconds } }
+        $sum
+    }
+    $a = & $cpu
+    Start-Sleep -Seconds $script:CpuSampleSeconds
+    $b = & $cpu
+    return [Math]::Max(0.0, $b - $a)
+}
+
+function Get-SessionActivity {
+    $now = & $script:Deps.Now
+    $newest = & $script:Deps.NewestTranscript
+    if ($newest -and ($now - $newest).TotalMinutes -lt $script:QuietMinutes) {
+        return @{ Idle = $false; Reason = "a Claude Code session wrote $([int]($now - $newest).TotalMinutes) min ago" }
+    }
+    $cpu = & $script:Deps.SessionCpu
+    if ($cpu -ge $script:BusyCpuSeconds) {
+        return @{ Idle = $false; Reason = ("Claude Code processes are busy ({0:N1}s CPU)" -f $cpu) }
+    }
+    return @{ Idle = $true; Reason = 'no active session' }
+}
+
+# ---------------------------------------------------------------------------
+# Claude processes and profiles
+# ---------------------------------------------------------------------------
+function Get-ClaudeMainProcesses {
+    @(Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -like '*\WindowsApps\Claude_*' -and $_.CommandLine -notmatch '\s--type=' })
+}
+
+# Profile name of each open Claude window process: '' for the default profile,
+# otherwise the folder name the launcher uses (--user-data-dir=<home>\<P>\<P>).
+function Get-OpenProfiles($Procs) {
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($Procs)) {
+        $cl = "$($p.CommandLine)"
+        $name = ''
+        $m = [regex]::Match($cl, '--user-data-dir="?([^"]+?)"?(\s|$)')
+        if ($m.Success) { $name = Split-Path -Leaf $m.Groups[1].Value.TrimEnd('\') }
+        if ($name -notmatch '^[A-Za-z0-9 _.-]*$') { continue }
+        if (-not $names.Contains($name)) { $names.Add($name) }
+    }
+    return ,$names.ToArray()
+}
+
+function Stop-AllClaude {
+    $procs = @(Get-CimInstance Win32_Process -Filter "Name='claude.exe'" -ErrorAction SilentlyContinue)
+    foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 3
+}
+
+function Start-ClaudeProfiles($Profiles) {
+    $list = @($Profiles)
+    if ($list.Count -eq 0) { $list = @('') }
+    foreach ($name in $list) {
+        if (Test-Path -LiteralPath $script:LauncherVbs) {
+            Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList "`"$script:LauncherVbs`" `"$name`""
+        } elseif (-not $name) {
+            Start-Process 'shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude'
+        }
+        Start-Sleep -Seconds 4
+    }
+}
+
+# Starts the protected repair task and waits for its verdict.
+function Invoke-RepairTask {
+    $before = (Get-Date).ToUniversalTime()
+    try { Start-ScheduledTask -TaskName $script:RepairTask -ErrorAction Stop }
+    catch { return @{ Result = 'no-task'; Message = $_.Exception.Message } }
+    $deadline = (Get-Date).AddMinutes(16)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        try {
+            $s = Get-Content -LiteralPath $script:RepairStatus -Raw | ConvertFrom-Json
+            $at = ConvertTo-Date $s.at
+            if ($at -and $at.ToUniversalTime() -gt $before) { return @{ Result = "$($s.result)"; Message = "$($s.message)" } }
+        } catch {}
+    }
+    return @{ Result = 'timeout'; Message = 'The repair task did not report back within 16 minutes' }
+}
+
+# Claude froze after staging an update: its main process is alive, Windows keeps a
+# newer Claude waiting for it to close, and no Claude log has moved for a while.
+function Test-UpdateStuck {
+    $procs = @(Get-ClaudeMainProcesses)
+    if ($procs.Count -eq 0) { return $false }
+    $installed = Get-InstalledClaudeVersion
+    if (-not $installed) { return $false }
+    $since = (Get-Date).AddHours(-12)
+    $waiting = $false
+    try {
+        $events = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-AppXDeploymentServer/Operational'; Id = 658; StartTime = $since } -ErrorAction Stop
+        foreach ($e in $events) {
+            if ($e.Message -match 'Claude_(\d+(?:\.\d+){3})_x64__pzs8sxrjxfjjc\} for deferred') {
+                if ([version]$Matches[1] -gt $installed) { $waiting = $true; break }
+            }
+        }
+    } catch {}
+    if (-not $waiting) { return $false }
+    $logs = @(Join-Path $env:LOCALAPPDATA 'Claude\Logs\main.log')
+    foreach ($p in $procs) {
+        $m = [regex]::Match("$($p.CommandLine)", '--user-data-dir="?([^"]+?)"?(\s|$)')
+        if ($m.Success) { $logs += Join-Path $m.Groups[1].Value 'logs\main.log' }
+    }
+    $fresh = (Get-Date).AddMinutes(-$script:StuckLogMinutes)
+    foreach ($l in $logs) {
+        if ((Test-Path -LiteralPath $l) -and (Get-Item -LiteralPath $l).LastWriteTime -gt $fresh) { return $false }
+    }
+    return $true
+}
+
+# ---------------------------------------------------------------------------
+# User interface
+# ---------------------------------------------------------------------------
+function Show-Toast([string]$Title, [string]$Body) {
+    try {
+        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+        [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+        $t = [Security.SecurityElement]::Escape($Title)
+        $b = [Security.SecurityElement]::Escape($Body)
         $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-        $xml.LoadXml($xmlStr)
-        $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Claude RTL Patch").Show($toast)
-    } catch {
-        Write-WLog "Toast failed: $($_.Exception.Message)"
+        $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$t</text><text>$b</text></binding></visual></toast>")
+        $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show(
+            (New-Object Windows.UI.Notifications.ToastNotification $xml))
+    } catch { Write-WLog "Toast failed: $($_.Exception.Message)" }
+}
+
+function Show-UpdatePrompt([string]$NewVersion, [string]$CurrentVersion) {
+    if (-not (Test-Path -LiteralPath $script:PromptScript)) { Write-WLog 'update-prompt.ps1 missing'; return }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$script:PromptScript`"", '-NewVersion', $NewVersion, '-CurrentVersion', $CurrentVersion)
+}
+
+# ---------------------------------------------------------------------------
+# The update itself
+# ---------------------------------------------------------------------------
+function Invoke-ClaudeUpdate($State, [string]$Why) {
+    $label = "$($State.pendingVersion)"
+    $launcherLock = New-Object Threading.Mutex($false, 'Local\ClaudeLauncherRepair')
+    $locked = $false
+    try {
+        try { $locked = $launcherLock.WaitOne([TimeSpan]::FromMinutes(12)) } catch [Threading.AbandonedMutexException] { $locked = $true }
+        Write-WLog "Updating Claude to $label ($Why)."
+        $profiles = Get-OpenProfiles (& $script:Deps.ClaudeMainProcs)
+        & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05de\u05ea\u05d7\u05d9\u05dc')) ((Heb 'Claude \u05d9\u05d9\u05e1\u05d2\u05e8 \u05dc\u05db\u05d3\u05e7\u05d4, \u05d9\u05ea\u05e2\u05d3\u05db\u05df \u05dc\u05d2\u05e8\u05e1\u05d4 ') + $label + (Heb ' \u05d5\u05d9\u05d7\u05d6\u05d5\u05e8 \u05e2\u05dd RTL.'))
+        & $script:Deps.StopClaude
+        $installed = $false
+        for ($try = 1; $try -le 2 -and -not $installed; $try++) {
+            try { & $script:Deps.AddPackage $State.pendingUrl; $installed = $true }
+            catch {
+                Write-WLog "Add-AppxPackage attempt $try failed: $($_.Exception.Message)"
+                & $script:Deps.StopClaude
+                & $script:Deps.Sleep 5
+            }
+        }
+        if (-not $installed) {
+            $State.lastResult = 'install-failed'
+            & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05e0\u05db\u05e9\u05dc')) ((Heb 'Windows \u05dc\u05d0 \u05d4\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05e2\u05d3\u05db\u05d5\u05df. Claude \u05e0\u05e4\u05ea\u05d7 \u05d1\u05d2\u05e8\u05e1\u05d4 \u05d4\u05e7\u05d9\u05d9\u05de\u05ea. \u05e4\u05e8\u05d8\u05d9\u05dd \u05d1-watcher.log.'))
+            & $script:Deps.StartProfiles $profiles
+            return $false
+        }
+        $repair = & $script:Deps.RunRepair
+        Write-WLog "Repair task: $($repair.Result) $($repair.Message)"
+        & $script:Deps.StartProfiles $profiles
+        if ($repair.Result -in @('ok', 'already')) {
+            & $script:Deps.Toast ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df')) ((Heb '\u05d2\u05e8\u05e1\u05d4 ') + $label + (Heb ' \u05de\u05d5\u05ea\u05e7\u05e0\u05ea, \u05d5\u05d4-RTL \u05d4\u05d5\u05d7\u05dc \u05de\u05d7\u05d3\u05e9.'))
+            $State.lastResult = 'ok'
+        } else {
+            & $script:Deps.Toast ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df, \u05d4-RTL \u05dc\u05d0 \u05d4\u05d5\u05d7\u05dc')) ((Heb '\u05ea\u05d5\u05e6\u05d0\u05ea \u05d4\u05ea\u05d9\u05e7\u05d5\u05df: ') + $repair.Result + (Heb '. \u05d0\u05e4\u05e9\u05e8 \u05dc\u05d4\u05e8\u05d9\u05e5 \u05d0\u05ea \u05e7\u05d9\u05e6\u05d5\u05e8 \u05d4\u05d3\u05e8\u05da Update Claude RTL.'))
+            $State.lastResult = "repair-$($repair.Result)"
+        }
+        $State.pendingVersion = $null; $State.pendingUrl = $null; $State.mode = $null
+        $State.at = $null; $State.promptedAt = $null; $State.busyNotified = $false
+        return $true
+    } finally {
+        if ($locked) { $launcherLock.ReleaseMutex() }
+        $launcherLock.Dispose()
     }
 }
 
-function Get-PatchedVer {
-    if (-not (Test-Path $stateFile)) { return $null }
+# One pass of the update manager. Returns the (possibly changed) state.
+function Invoke-ManagerTick($State, [switch]$ForceCheck) {
+    $now = & $script:Deps.Now
+    $State = Merge-PromptChoice $State
+
+    # 1. Hourly look at the release feed.
+    $last = ConvertTo-Date $State.lastCheck
+    if ($ForceCheck -or -not $last -or ($now - $last).TotalMinutes -ge $script:CheckEveryMin) {
+        $State.lastCheck = $now.ToString('o')
+        try {
+            $rel = ConvertFrom-Feed (& $script:Deps.GetFeed)
+            $installed = & $script:Deps.GetInstalledVer
+            if (-not $rel) { Write-WLog 'Release feed answer not recognized - ignored.' }
+            elseif ($installed -and $rel.Version -gt $installed) {
+                if ("$($State.pendingVersion)" -ne $rel.Label) {
+                    Write-WLog "Claude $($rel.Label) is available (installed $installed)."
+                    $State.pendingVersion = $rel.Label; $State.pendingUrl = $rel.Url
+                    $State.mode = 'ask'; $State.promptedAt = $null; $State.busyNotified = $false
+                } else { $State.pendingUrl = $rel.Url }
+            } elseif ($State.pendingVersion -and $installed -and (ConvertTo-Version $State.pendingVersion) -le $installed) {
+                Write-WLog "Claude $installed is installed - clearing the pending update."
+                $State.pendingVersion = $null; $State.pendingUrl = $null; $State.mode = $null
+            }
+        } catch { Write-WLog "Feed check failed: $($_.Exception.Message)" }
+    }
+
+    # 2. Claude froze on an update Windows is holding: same path as "when idle".
+    if (& $script:Deps.StuckSignal) {
+        if (-not $State.pendingVersion) {
+            try {
+                $rel = ConvertFrom-Feed (& $script:Deps.GetFeed)
+                if ($rel) { $State.pendingVersion = $rel.Label; $State.pendingUrl = $rel.Url }
+            } catch {}
+        }
+        if ($State.pendingVersion -and $State.mode -ne 'idle') {
+            Write-WLog 'Claude is frozen on a waiting update - will finish it as soon as no session is working.'
+            $State.mode = 'idle'
+        }
+    }
+
+    if (-not $State.pendingVersion) { return $State }
+
+    switch ("$($State.mode)") {
+        'snooze' {
+            $until = ConvertTo-Date $State.snoozeUntil
+            if (-not $until -or $now -ge $until) { $State.mode = 'ask'; $State.promptedAt = $null }
+        }
+        'at' {
+            $at = ConvertTo-Date $State.at
+            if (-not $at -or $now -ge $at) { $State.mode = 'idle'; Write-WLog 'Scheduled time reached.' }
+        }
+    }
+
+    switch ("$($State.mode)") {
+        'ask' {
+            $prompted = ConvertTo-Date $State.promptedAt
+            if (-not $prompted -or ($now - $prompted).TotalHours -ge $script:RepromptAfterHours) {
+                $cur = "$(& $script:Deps.GetInstalledVer)"
+                & $script:Deps.ShowPrompt $State.pendingVersion $cur
+                $State.promptedAt = $now.ToString('o')
+            }
+        }
+        { $_ -in @('now', 'idle') } {
+            $act = Get-SessionActivity
+            if ($act.Idle) {
+                [void](Invoke-ClaudeUpdate $State $act.Reason)
+            } else {
+                Write-WLog "Update waits: $($act.Reason)."
+                if ($State.mode -eq 'now' -or -not $State.busyNotified) {
+                    & $script:Deps.Toast ((Heb '\u05d4\u05e2\u05d3\u05db\u05d5\u05df \u05de\u05de\u05ea\u05d9\u05df \u05dc\u05e1\u05d9\u05d5\u05dd \u05d4\u05e1\u05e9\u05e0\u05d9\u05dd')) ((Heb '\u05d9\u05e9 \u05e1\u05e9\u05df \u05e9\u05dc Claude Code \u05e9\u05e2\u05d5\u05d1\u05d3 \u05e2\u05db\u05e9\u05d9\u05d5. \u05d4\u05e2\u05d3\u05db\u05d5\u05df \u05d9\u05ea\u05d1\u05e6\u05e2 \u05d0\u05d5\u05d8\u05d5\u05de\u05d8\u05d9\u05ea \u05db\u05e9\u05db\u05dc \u05d4\u05e1\u05e9\u05e0\u05d9\u05dd \u05d9\u05e1\u05ea\u05d9\u05d9\u05de\u05d5.'))
+                    $State.busyNotified = $true
+                }
+                $State.mode = 'idle'
+            }
+        }
+    }
+    return $State
+}
+
+# ---------------------------------------------------------------------------
+# RTL re-patch when a new Claude version starts (no download, no elevation here).
+# ---------------------------------------------------------------------------
+function Get-PatchedVersion {
+    try { return [version](Get-Content -LiteralPath $script:StateFile -Raw | ConvertFrom-Json).patchedVersion } catch { return $null }
+}
+
+$script:LastRepairStart = [datetime]::MinValue
+function Test-AndRepair([string]$ExePath) {
+    if ($ExePath -notmatch '\\WindowsApps\\Claude_(\d+(?:\.\d+){1,3})_') { return }
+    $ver = [version]$Matches[1]
+    $patched = Get-PatchedVersion
+    if ($patched -and $ver -le $patched) { return }
+    if (((Get-Date) - $script:LastRepairStart).TotalSeconds -lt 90) { return }
+    $script:LastRepairStart = Get-Date
+    Write-WLog "Claude $ver started unpatched (patched: $patched) - starting the repair task."
+    $r = & $script:Deps.RunRepair
+    Write-WLog "Repair task: $($r.Result) $($r.Message)"
+}
+
+function Invoke-WatcherLoop {
+    Write-WLog "Watcher started (PID $PID, user $env:USERNAME)."
+    try { Get-ClaudeMainProcesses | Select-Object -First 1 | ForEach-Object { Test-AndRepair $_.ExecutablePath } } catch {}
+    $query = "SELECT * FROM __InstanceCreationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name = 'claude.exe'"
+    Register-CimIndicationEvent -Query $query -SourceIdentifier 'ClaudeProcessCreated' | Out-Null
+    $state = Read-ManagerState
+    $state = Invoke-ManagerTick $state
+    Save-ManagerState $state
+    while ($true) {
+        $ev = Wait-Event -SourceIdentifier 'ClaudeProcessCreated' -Timeout 300
+        if ($ev) {
+            try { Test-AndRepair $ev.SourceEventArgs.NewEvent.TargetInstance.ExecutablePath }
+            catch { Write-WLog "Event handler error: $($_.Exception.Message)" }
+            finally { Remove-Event -EventIdentifier $ev.EventIdentifier }
+            continue
+        }
+        try {
+            $state = Read-ManagerState      # the prompt window writes the user's choice here
+            $state = Invoke-ManagerTick $state
+            Save-ManagerState $state
+        } catch { Write-WLog "Manager tick error: $($_.Exception.Message)" }
+    }
+}
+
+# Dot-sourcing (tests) loads the functions only.
+if ($MyInvocation.InvocationName -ne '.') { Invoke-WatcherLoop }
+# --- CLAUDE RTL COMPONENT watcher END ---
+'@ }
+        'repair' { return @'
+# --- CLAUDE RTL COMPONENT repair START ---
+# Claude RTL Patch -- protected repair runner (repair.ps1).
+#
+# Lives in C:\ProgramData\ClaudeRtlPatch (Administrators/SYSTEM write only) and is
+# started two ways:
+#   * By the "ClaudeRtlPatchRepair" scheduled task, as SYSTEM, with NO arguments.
+#     Any process of the signed-in user may start that task, so this path takes no
+#     input at all: it re-patches the installed Claude only when it is not patched
+#     yet, from the local copy of patch.ps1 that was verified against the pinned key.
+#   * By the "Update Claude RTL" shortcut through a UAC prompt with -Refresh: fetches
+#     the newest signed patch.ps1 from GitHub, verifies it, refuses older builds
+#     (rollback protection), stores it and re-patches.
+#
+# Hardening (see docs/SECURITY-update-manager.md):
+#   - The environment is rebuilt from fixed values before any cmdlet runs, so
+#     nothing the user can set (PATH, PSModulePath, NODE_OPTIONS, TEMP...) reaches
+#     the elevated code. As SYSTEM the task never sees the user's environment.
+#   - Code runs only from this admin-only folder, never from %TEMP%.
+#   - patch.ps1 is verified against the pinned public key right before it runs.
+#
+# KEEP THIS FILE ASCII-ONLY (embedded in patch.ps1, read by PS 5.1 as ANSI).
+
+param(
+    [switch]$Refresh,   # UAC path only: fetch + verify the newest signed patch.ps1
+    [switch]$Force      # UAC path only: re-patch even when already patched
+)
+
+# ---- 1. Fixed environment, before anything else runs -------------------------
+$sys = [Environment]::GetFolderPath('System')                  # C:\Windows\System32
+$win = Split-Path -Parent $sys
+$pf  = [Environment]::GetFolderPath('ProgramFiles')
+$env:PATH         = "$sys;$win;$sys\Wbem;$sys\WindowsPowerShell\v1.0;$pf\nodejs"
+$env:PSModulePath = "$sys\WindowsPowerShell\v1.0\Modules;$pf\WindowsPowerShell\Modules"
+$env:PATHEXT      = '.COM;.EXE;.BAT;.CMD'
+$env:ComSpec      = "$sys\cmd.exe"
+foreach ($v in @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'PSExecutionPolicyPreference',
+                 'CLAUDE_RTL_AUTO', 'CLAUDE_RTL_TRUSTED_PUBKEY', 'CLAUDE_RTL_CUSTOM_FONT',
+                 'CLAUDE_RTL_ARABIC_FONT', 'CLAUDE_RTL_CUSTOM_FONT_SCOPE')) {
+    [Environment]::SetEnvironmentVariable($v, $null, 'Process')
+}
+Get-ChildItem Env: | Where-Object { $_.Name -like 'npm_config_*' } | ForEach-Object {
+    [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process')
+}
+
+$ErrorActionPreference = 'Stop'
+$StateDir   = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'ClaudeRtlPatch'
+$PinFile    = Join-Path $StateDir 'trusted-pubkey.b64'
+$LocalPatch = Join-Path $StateDir 'patch-local.ps1'
+$LocalSig   = Join-Path $StateDir 'patch-local.ps1.sig'
+$RunFile    = Join-Path $StateDir 'patch-run.ps1'
+$StatusFile = Join-Path $StateDir 'repair-status.json'
+$StateFile  = Join-Path $StateDir 'state.json'
+$LogFile    = Join-Path $StateDir 'repair.log'
+$WorkTemp   = Join-Path $StateDir 'tmp'
+$RepoBase   = 'https://raw.githubusercontent.com/guybito/claude-desktop-rtl-patch/main'
+# Only the Microsoft Store / MSIX build of Claude, signed by Anthropic.
+$ClaudeDirRe = '^[A-Za-z]:\\Program Files\\WindowsApps\\Claude_(\d+(?:\.\d+){1,3})_x64__pzs8sxrjxfjjc$'
+
+function Write-RLog([string]$Msg) {
     try {
-        $s = Get-Content $stateFile -Raw | ConvertFrom-Json
-        if ($s.patchedVersion) { return [Version]$s.patchedVersion }
-    } catch { Write-WLog "State read error: $($_.Exception.Message)" }
-    return $null
+        if ((Test-Path -LiteralPath $LogFile) -and (Get-Item -LiteralPath $LogFile).Length -gt 512KB) {
+            Move-Item -LiteralPath $LogFile "$LogFile.old" -Force
+        }
+        "$([DateTime]::Now.ToString('o'))  [$([Security.Principal.WindowsIdentity]::GetCurrent().Name)]  $Msg" |
+            Out-File -Append -FilePath $LogFile -Encoding UTF8
+    } catch {}
+    if ($Refresh -or $Force) { Write-Host $Msg }
+}
+
+function Write-Status([string]$Result, [string]$Version, [string]$Message) {
+    try {
+        [ordered]@{
+            at      = (Get-Date).ToUniversalTime().ToString('o')
+            result  = $Result
+            version = $Version
+            message = $Message
+        } | ConvertTo-Json | Set-Content -LiteralPath $StatusFile -Encoding UTF8
+    } catch {}
+}
+
+# True only for a real folder owned by Administrators/SYSTEM that standard users
+# cannot write to. Everything elevated in this script depends on it.
+function Test-StateDirLocked {
+    $item = Get-Item -LiteralPath $StateDir -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+    $acl = Get-Acl -LiteralPath $StateDir
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -ne 'S-1-5-32-544' -and $owner -ne 'S-1-5-18') { return $false }
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    $writeBits = [Security.AccessControl.FileSystemRights]::WriteData -bor
+                 [Security.AccessControl.FileSystemRights]::AppendData -bor
+                 [Security.AccessControl.FileSystemRights]::Delete -bor
+                 [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                 [Security.AccessControl.FileSystemRights]::TakeOwnership
+    foreach ($ace in $acl.Access) {
+        if ($ace.AccessControlType -ne 'Allow') { continue }
+        $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -in @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0')) { continue }
+        if ($ace.FileSystemRights -band $writeBits) { return $false }
+    }
+    return $true
 }
 
 function Get-PinnedRsa {
-    # Loads the pinned pubkey and returns an RSA object plus the original base64 blob
-    # (so callers can forward it via env var without re-encoding). Used directly to
-    # verify patch.ps1.sig; install.ps1 is never consulted.
-    try {
-        if (-not (Test-Path $pubkeyPinFile)) {
-            Write-WLog "No pinned pubkey at $pubkeyPinFile -- refusing to auto-update."
-            return $null
-        }
-        $pubB64 = (Get-Content $pubkeyPinFile -Raw).Trim()
-        if (-not $pubB64) {
-            Write-WLog "Pinned pubkey file is empty -- refusing to auto-update."
-            return $null
-        }
-        $pubJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pubB64))
-        $pubObj  = $pubJson | ConvertFrom-Json
-        $params = New-Object System.Security.Cryptography.RSAParameters
-        $params.Modulus  = [Convert]::FromBase64String($pubObj.Modulus)
-        $params.Exponent = [Convert]::FromBase64String($pubObj.Exponent)
-        $rsa = [System.Security.Cryptography.RSA]::Create()
-        $rsa.ImportParameters($params)
-        return @{ Rsa = $rsa; PubB64 = $pubB64 }
-    } catch {
-        Write-WLog "Get-PinnedRsa error: $($_.Exception.Message)"
-        return $null
-    }
+    $b64 = ([IO.File]::ReadAllText($PinFile)).Trim()
+    $obj = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json
+    $p = New-Object Security.Cryptography.RSAParameters
+    $p.Modulus  = [Convert]::FromBase64String($obj.Modulus)
+    $p.Exponent = [Convert]::FromBase64String($obj.Exponent)
+    $rsa = [Security.Cryptography.RSA]::Create()
+    $rsa.ImportParameters($p)
+    return @{ Rsa = $rsa; B64 = $b64 }
 }
 
-function Invoke-AutoPatch($newVer, $exePath) {
-    # Throttle: skip if we acted in the last 90s (avoids loops on Electron startup).
-    if (Test-Path $lastActionFile) {
-        try {
-            $last = [DateTime]::Parse((Get-Content $lastActionFile -Raw))
-            if (((Get-Date) - $last).TotalSeconds -lt 90) {
-                Write-WLog "Throttled (last action $([int]((Get-Date)-$last).TotalSeconds)s ago)"
-                return
+function Test-Signature($Rsa, [byte[]]$Bytes, [string]$SigB64) {
+    try { $sig = [Convert]::FromBase64String($SigB64.Trim()) } catch { return $false }
+    return $Rsa.VerifyData($Bytes, $sig, [Security.Cryptography.HashAlgorithmName]::SHA256,
+        [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+}
+
+# Build number embedded in patch.ps1 ($script:PatchBuild = N). Old releases have
+# none, which reads as 0 and is therefore never accepted over a newer local copy.
+function Get-PatchBuild([byte[]]$Bytes) {
+    $text = [Text.Encoding]::UTF8.GetString($Bytes)
+    $m = [regex]::Match($text, '(?m)^\$script:PatchBuild\s*=\s*([0-9]+)\s*$')
+    if ($m.Success) { return [int64]$m.Groups[1].Value }
+    return [int64]0
+}
+
+function Get-RemotePatch {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $wc = New-Object Net.WebClient
+    return @{ Bytes = $wc.DownloadData("$RepoBase/patch.ps1"); Sig = $wc.DownloadString("$RepoBase/patch.ps1.sig").Trim() }
+}
+
+# Newest Claude package that is fully installed (not merely staged) for some user.
+function Get-InstalledClaude {
+    $pkgs = @(Get-AppxPackage -AllUsers -Name 'Claude' -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.InstallLocation -match $ClaudeDirRe -and (Test-Path -LiteralPath $_.InstallLocation) -and
+            @($_.PackageUserInformation | Where-Object { "$($_.InstallState)" -eq 'Installed' }).Count -gt 0
+        } | Sort-Object { [version]$_.Version } -Descending)
+    if ($pkgs.Count -eq 0) { return $null }
+    return $pkgs[0]
+}
+
+# Why the installed Claude needs the patch, or $null when it is patched and healthy.
+function Get-RepairReason($Pkg) {
+    $asar = Join-Path $Pkg.InstallLocation 'app\resources\app.asar'
+    if (-not (Test-Path -LiteralPath $asar)) { return 'app.asar is missing' }
+    if ((Get-Item -LiteralPath $asar).Length -eq 0) { return 'app.asar is empty' }
+    if (-not (Test-Path -LiteralPath $StateFile)) { return 'no patch state' }
+    try { $st = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json } catch { return 'patch state unreadable' }
+    if ("$($st.patchedVersion)" -ne "$($Pkg.Version)") { return "Claude $($Pkg.Version) is not patched (last: $($st.patchedVersion))" }
+    return $null
+}
+
+function Invoke-Main {
+    $mutex = New-Object Threading.Mutex($false, 'Global\ClaudeRtlRepair')
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { Write-RLog 'Another repair is running - nothing to do.'; return 0 }
+
+        if (-not (Test-StateDirLocked)) {
+            Write-RLog "REFUSED: $StateDir is not locked to administrators."
+            Write-Status 'refused' '' 'State folder is not admin-only'
+            return 3
+        }
+        if (-not (Test-Path -LiteralPath $PinFile)) {
+            Write-RLog 'REFUSED: no pinned public key.'
+            Write-Status 'refused' '' 'No pinned public key'
+            return 3
+        }
+        $pin = Get-PinnedRsa
+
+        if ($Refresh) {
+            Write-RLog 'Fetching the newest signed patch.ps1 from GitHub...'
+            $remote   = Get-RemotePatch
+            $newBytes = $remote.Bytes
+            $newSig   = $remote.Sig
+            if (-not (Test-Signature $pin.Rsa $newBytes $newSig)) {
+                Write-RLog 'REFUSED: downloaded patch.ps1 does not match the pinned key.'
+                Write-Status 'verify-failed' '' 'Downloaded patch.ps1 failed signature verification'
+                return 4
             }
-        } catch {}
-    }
-    (Get-Date).ToString('o') | Set-Content $lastActionFile -Encoding UTF8
+            $haveBuild = [int64]0
+            if (Test-Path -LiteralPath $LocalPatch) { $haveBuild = Get-PatchBuild ([IO.File]::ReadAllBytes($LocalPatch)) }
+            $newBuild = Get-PatchBuild $newBytes
+            if ($newBuild -lt $haveBuild) {
+                Write-RLog "REFUSED: GitHub has build $newBuild, older than the local build $haveBuild (rollback)."
+                Write-Status 'refused' '' "Older patch build $newBuild than local $haveBuild"
+                return 4
+            }
+            [IO.File]::WriteAllBytes($LocalPatch, $newBytes)
+            [IO.File]::WriteAllText($LocalSig, $newSig, (New-Object Text.UTF8Encoding $false))
+            Write-RLog "Stored verified patch.ps1 build $newBuild."
+        }
 
-    Write-WLog "Detected Claude v$newVer at $exePath -- verifying signature before patching..."
+        if (-not (Test-Path -LiteralPath $LocalPatch) -or -not (Test-Path -LiteralPath $LocalSig)) {
+            Write-RLog 'No local verified patch.ps1 yet - run the Update Claude RTL shortcut once.'
+            Write-Status 'needs-refresh' '' 'No local verified patch.ps1'
+            return 5
+        }
+        $bytes = [IO.File]::ReadAllBytes($LocalPatch)
+        if (-not (Test-Signature $pin.Rsa $bytes ([IO.File]::ReadAllText($LocalSig)))) {
+            Write-RLog 'REFUSED: local patch.ps1 does not match the pinned key.'
+            Write-Status 'verify-failed' '' 'Local patch.ps1 failed signature verification'
+            return 4
+        }
 
-    $pinned = Get-PinnedRsa
-    if (-not $pinned) {
-        Show-Toast "Claude RTL: auto-update BLOCKED" "Trusted pubkey pin is missing or unreadable. Re-install the patch manually to restore auto-updates."
-        return
-    }
+        $pkg = Get-InstalledClaude
+        if (-not $pkg) {
+            Write-RLog 'Claude (Store/MSIX) is not installed - nothing to patch.'
+            Write-Status 'no-claude' '' 'Claude is not installed'
+            return 6
+        }
+        $reason = Get-RepairReason $pkg
+        if (-not $reason -and -not $Force) {
+            Write-RLog "Claude $($pkg.Version) is already patched - nothing to do."
+            Write-Status 'already' "$($pkg.Version)" 'Already patched'
+            return 0
+        }
+        if (-not $reason) { $reason = 'forced re-patch' }
+        Write-RLog "Repairing: $reason"
 
-    # Fetch as raw bytes and verify those directly. The signature is over the
-    # LF-normalized bytes the maintainer signed (raw.githubusercontent.com serves LF
-    # via .gitattributes); decoding to string first could alter BOMs.
-    try {
-        $wc = New-Object System.Net.WebClient
-        $patchBytes = $wc.DownloadData($patchUrl)
-        $sigB64     = $wc.DownloadString($sigUrl).Trim()
+        # Runnable copy: same verified bytes plus the UTF-8 BOM PS 5.1 needs. It is
+        # written into the admin-only folder, so nothing unprivileged can swap it.
+        $text = [Text.Encoding]::UTF8.GetString($bytes)
+        if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+        if (Test-Path -LiteralPath $RunFile) { Remove-Item -LiteralPath $RunFile -Force }
+        [IO.File]::WriteAllText($RunFile, $text, (New-Object Text.UTF8Encoding $true))
+        if (-not (Test-Path -LiteralPath $WorkTemp)) { New-Item -ItemType Directory -Path $WorkTemp | Out-Null }
+        $env:TEMP = $WorkTemp; $env:TMP = $WorkTemp
+
+        $psExe = Join-Path $sys 'WindowsPowerShell\v1.0\powershell.exe'
+        # PS 5.1 joins -ArgumentList with plain spaces, so quote the paths here.
+        $psArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', "`"$RunFile`"",
+                  '-Auto', '-Silent', '-ClaudeDir', "`"$($pkg.InstallLocation)`"", '-TrustedPubKey', $pin.B64)
+        $proc = Start-Process -FilePath $psExe -ArgumentList $psArgs -WindowStyle Hidden -PassThru
+        if (-not $proc.WaitForExit(15 * 60 * 1000)) {
+            try { $proc.Kill() } catch {}
+            Write-RLog 'Patch run timed out after 15 minutes.'
+            Write-Status 'failed' "$($pkg.Version)" 'Timed out'
+            return 7
+        }
+        $code = $proc.ExitCode
+        $after = Get-RepairReason $pkg
+        if ($code -eq 0 -and -not $after) {
+            Write-RLog "RTL patch applied to Claude $($pkg.Version)."
+            Write-Status 'ok' "$($pkg.Version)" 'Patched'
+            return 0
+        }
+        Write-RLog "Patch run failed (exit $code; $after). See patch.log."
+        Write-Status 'failed' "$($pkg.Version)" "Exit $code; $after"
+        return 8
     } catch {
-        Write-WLog "Download failed: $($_.Exception.Message)"
-        Show-Toast "Claude RTL: auto-update failed" "Network error downloading patch. Will retry next launch."
-        return
-    }
-
-    try {
-        $sigBytes = [Convert]::FromBase64String($sigB64)
-    } catch {
-        Write-WLog "Signature is not valid base64: $($_.Exception.Message)"
-        Show-Toast "Claude RTL: auto-update BLOCKED" "Downloaded signature is malformed. Will not run patch."
-        return
-    }
-
-    $valid = $pinned.Rsa.VerifyData(
-        $patchBytes, $sigBytes,
-        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-        [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-
-    if (-not $valid) {
-        Write-WLog "SIGNATURE MISMATCH on patch.ps1 -- refusing to auto-update."
-        Show-Toast "Claude RTL: auto-update BLOCKED" "patch.ps1 does not match the pinned maintainer key. The repo may have been compromised. Re-install manually only after verifying the source out-of-band."
-        return
-    }
-
-    Write-WLog "Signature verified ($($patchBytes.Length) bytes). Writing temp file and launching patch.ps1..."
-
-    # Write with a UTF-8 BOM (PS 5.1 needs it to parse patch.ps1); strip any incoming
-    # BOM first to avoid a double-BOM.
-    $tmpFile = Join-Path $env:TEMP 'claude_rtl_patch.ps1'
-    $content = [System.Text.Encoding]::UTF8.GetString($patchBytes)
-    if ($content.Length -gt 0 -and $content[0] -eq [char]0xFEFF) { $content = $content.Substring(1) }
-    [System.IO.File]::WriteAllText($tmpFile, $content, [System.Text.UTF8Encoding]::new($true))
-
-    # An unelevated watcher (#34) must NOT kill Claude before elevation: the re-patch
-    # pauses on a UAC prompt, which without approval leaves a kill-relaunch loop.
-    # Elevated watchers keep the snappy kill-first behavior.
-    $watcherIsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($watcherIsAdmin) {
-        Show-Toast "Claude updated to v$newVer" "Auto-patching now. A PowerShell window will open with the patch log."
-        Get-Process -Name claude,cowork-svc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    } else {
-        Show-Toast "Claude updated to v$newVer" "The RTL patch needs re-applying. Please approve the admin (UAC) prompt."
-    }
-
-    try {
-        # Propagate the pinned pubkey to the child so its Save-TrustedPubkey keeps the
-        # SAME anchor. The watcher is elevated (RunLevel Highest), so the spawned child
-        # inherits the token without a UAC prompt.
-        $env:CLAUDE_RTL_TRUSTED_PUBKEY = $pinned.PubB64
-        $env:CLAUDE_RTL_AUTO = '1'
-        Start-Process -FilePath "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -ArgumentList @(
-                '-NoProfile',
-                '-ExecutionPolicy', 'Bypass',
-                '-File', $tmpFile,
-                '-Auto'
-            ) | Out-Null
-        Write-WLog "Spawned verified patch.ps1 (file=$tmpFile)"
-    } catch {
-        Write-WLog "Failed to launch patch.ps1: $($_.Exception.Message)"
-        Show-Toast "Auto-patch FAILED to start" "Please run patch.ps1 manually as Administrator. See watcher.log."
+        Write-RLog "Repair error: $($_.Exception.Message)"
+        Write-Status 'failed' '' $_.Exception.Message
+        return 9
     } finally {
-        Remove-Item Env:CLAUDE_RTL_AUTO -ErrorAction SilentlyContinue
-        Remove-Item Env:CLAUDE_RTL_TRUSTED_PUBKEY -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $RunFile) { Remove-Item -LiteralPath $RunFile -Force -ErrorAction SilentlyContinue }
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
     }
 }
 
-function Test-AndPatch($exePath) {
-    if (-not $exePath) { return }
-    $newVer = Get-VerFromPath $exePath
-    if (-not $newVer) { return }
-    $patchedVer = Get-PatchedVer
-    if (-not $patchedVer) { Write-WLog "No state file; ignoring v$newVer"; return }
-    if ($newVer -gt $patchedVer) { Invoke-AutoPatch -newVer $newVer -exePath $exePath }
+# Dot-sourcing (tests) loads the functions only.
+if ($MyInvocation.InvocationName -ne '.') {
+    $rc = Invoke-Main
+    if ($Refresh -or $Force) {
+        Write-Host ''
+        Write-Host 'Press Enter to close this window...'
+        $null = Read-Host
+    }
+    exit $rc
+}
+# --- CLAUDE RTL COMPONENT repair END ---
+'@ }
+        'update-prompt' { return @'
+# --- CLAUDE RTL COMPONENT update-prompt START ---
+# Claude RTL Patch -- "a Claude update is available" window (update-prompt.ps1).
+#
+# Started hidden by watcher.ps1 as the signed-in user (no admin rights). Shows one
+# right-to-left window and writes the choice to update-choice.json in the user's
+# LocalAppData; the watcher reads it on its next pass (within 5 minutes) and deletes
+# it. Closing the window without choosing means "ask me again later".
+#
+# Hebrew text appears only inside (Heb '...') calls (turned into \u escapes by the build).
+
+param(
+    [Parameter(Mandatory)][ValidatePattern('^\d+(\.\d+){1,3}$')][string]$NewVersion,
+    [ValidatePattern('^(\d+(\.\d+){1,3})?$')][string]$CurrentVersion = ''
+)
+
+function Heb([string]$s) { return [regex]::Unescape($s) }
+
+$script:ChoiceFile = Join-Path $env:LOCALAPPDATA 'ClaudeRtlPatch\update-choice.json'
+
+# Next occurrence of HH:00 (default for the "at a set time" picker).
+function Get-NextAt([datetime]$Now, [int]$Hour) {
+    $t = $Now.Date.AddHours($Hour)
+    if ($t -le $Now.AddMinutes(5)) { $t = $t.AddDays(1) }
+    return $t
 }
 
-Write-WLog "Watcher started (PID $PID, user $env:USERNAME)"
-Write-WLog "Currently patched version: $(Get-PatchedVer)"
+function New-Choice([string]$Mode, [datetime]$Now, $At) {
+    $c = [ordered]@{ version = $NewVersion; mode = $Mode; madeAt = $Now.ToString('o'); at = $null; snoozeUntil = $null }
+    if ($Mode -eq 'at')     { $c.at = ([datetime]$At).ToString('o') }
+    if ($Mode -eq 'snooze') { $c.snoozeUntil = $Now.Date.AddDays(1).AddHours(9).ToString('o') }
+    return $c
+}
 
-# Initial sweep -- Claude may already be running a newer version at watcher start.
-try {
-    $existing = Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1
-    if ($existing) { Test-AndPatch $existing.Path }
-} catch {}
+function Save-Choice($Choice) {
+    $dir = Split-Path $script:ChoiceFile
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $Choice | ConvertTo-Json | Set-Content -LiteralPath $script:ChoiceFile -Encoding UTF8
+}
 
-$query = "SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name = 'claude.exe'"
-Register-CimIndicationEvent -Query $query -SourceIdentifier "ClaudeProcessCreated" | Out-Null
-Write-WLog "WMI subscription active. Idling..."
+function Show-Window {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $font = New-Object System.Drawing.Font('Segoe UI', 10)
 
-while ($true) {
-    $ev = Wait-Event -SourceIdentifier "ClaudeProcessCreated" -Timeout 3600
-    if ($null -eq $ev) { continue }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = (Heb '\u05e2\u05d3\u05db\u05d5\u05df \u05dc-Claude')
+    $form.RightToLeft = 'Yes'
+    $form.RightToLeftLayout = $true
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false; $form.MinimizeBox = $false
+    $form.StartPosition = 'CenterScreen'
+    $form.TopMost = $true
+    $form.Font = $font
+    $form.ClientSize = New-Object System.Drawing.Size(460, 300)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = (Heb '\u05d2\u05e8\u05e1\u05d4 \u05d7\u05d3\u05e9\u05d4 \u05e9\u05dc Claude \u05d6\u05de\u05d9\u05e0\u05d4: ') + $NewVersion
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Bold)
+    $title.AutoSize = $false
+    $title.SetBounds(16, 14, 428, 26)
+    $form.Controls.Add($title)
+
+    $body = New-Object System.Windows.Forms.Label
+    $cur = if ($CurrentVersion) { (Heb '\u05de\u05d5\u05ea\u05e7\u05e0\u05ea \u05e2\u05db\u05e9\u05d9\u05d5: ') + $CurrentVersion + '. ' } else { '' }
+    $body.Text = $cur + (Heb '\u05d4\u05e2\u05d3\u05db\u05d5\u05df \u05e1\u05d5\u05d2\u05e8 \u05d0\u05ea \u05db\u05dc \u05d7\u05dc\u05d5\u05e0\u05d5\u05ea Claude \u05dc\u05db\u05d3\u05e7\u05d4, \u05de\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05d2\u05e8\u05e1\u05d4, \u05de\u05d7\u05d9\u05dc \u05de\u05d7\u05d3\u05e9 \u05d0\u05ea \u05d4-RTL \u05d5\u05e4\u05d5\u05ea\u05d7 \u05d0\u05d5\u05ea\u05dd \u05e9\u05d5\u05d1. \u05dc\u05e4\u05e0\u05d9 \u05db\u05dc \u05e2\u05d3\u05db\u05d5\u05df \u05e0\u05d1\u05d3\u05e7 \u05e9\u05d0\u05d9\u05df \u05e1\u05e9\u05df \u05e9\u05dc Claude Code \u05e9\u05e2\u05d5\u05d1\u05d3.')
+    $body.AutoSize = $false
+    $body.SetBounds(16, 46, 428, 66)
+    $form.Controls.Add($body)
+
+    $now = Get-Date
+    $script:PromptChoice = $null
+    $script:PromptForm = $form
+
+    $mk = {
+        param([string]$Text, [int]$Y, [string]$Mode)
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $Text
+        $b.SetBounds(16, $Y, 428, 32)
+        $b.Tag = $Mode
+        $b.Add_Click({
+            $script:PromptChoice = New-Choice $this.Tag (Get-Date) $null
+            $script:PromptForm.Close()
+        })
+        $form.Controls.Add($b)
+        return $b
+    }
+    $btnNow  = & $mk ((Heb '\u05dc\u05e2\u05d3\u05db\u05df \u05e2\u05db\u05e9\u05d9\u05d5')) 120 'now'
+    $btnIdle = & $mk ((Heb '\u05dc\u05e2\u05d3\u05db\u05df \u05db\u05e9\u05db\u05dc \u05d4\u05e1\u05e9\u05e0\u05d9\u05dd \u05d9\u05e1\u05ea\u05d9\u05d9\u05de\u05d5')) 158 'idle'
+    $form.AcceptButton = $btnIdle
+    $form.ActiveControl = $btnIdle      # Enter never means "update right now"
+
+    $picker = New-Object System.Windows.Forms.DateTimePicker
+    $picker.Format = 'Custom'
+    $picker.CustomFormat = 'dd/MM/yyyy HH:mm'
+    $picker.MinDate = $now
+    $picker.Value = Get-NextAt $now 2
+    $picker.RightToLeft = 'No'
+    $picker.SetBounds(16, 200, 170, 30)
+    $form.Controls.Add($picker)
+    $script:PromptPicker = $picker
+
+    $btnAt = New-Object System.Windows.Forms.Button
+    $btnAt.Text = (Heb '\u05dc\u05ea\u05d6\u05de\u05df \u05dc\u05e9\u05e2\u05d4 \u05d4\u05d6\u05d5')
+    $btnAt.SetBounds(196, 197, 248, 32)
+    $btnAt.Add_Click({
+        $script:PromptChoice = New-Choice 'at' (Get-Date) $script:PromptPicker.Value
+        $script:PromptForm.Close()
+    })
+    $form.Controls.Add($btnAt)
+
+    $btnLater = & $mk ((Heb '\u05dc\u05d4\u05d6\u05db\u05d9\u05e8 \u05dc\u05d9 \u05de\u05d7\u05e8 \u05d1\u05d1\u05d5\u05e7\u05e8')) 246 'snooze'
+    $form.CancelButton = $btnLater
+
+    [void]$form.ShowDialog()
+    return $script:PromptChoice
+}
+
+# Dot-sourcing (tests) loads the functions only.
+if ($MyInvocation.InvocationName -ne '.') {
+    $mutex = New-Object Threading.Mutex($false, 'Local\ClaudeRtlUpdatePrompt')
+    $owned = $false
+    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) { exit 0 }     # a prompt is already on screen
     try {
-        $p = $ev.SourceEventArgs.NewEvent.TargetInstance.ExecutablePath
-        Test-AndPatch $p
-    } catch {
-        Write-WLog "Event handler error: $($_.Exception.Message)"
-    } finally {
-        Remove-Event -EventIdentifier $ev.EventIdentifier
+        $choice = Show-Window
+        if ($choice) { Save-Choice $choice }
+    } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
+# --- CLAUDE RTL COMPONENT update-prompt END ---
+'@ }
+    }
+    throw "Unknown component $Name"
+}
+
+function Save-ManagerComponents {
+    if (-not (Protect-RtlStateDir)) {
+        throw "State dir could not be secured; refusing to write the update-manager scripts."
+    }
+    foreach ($name in @('watcher', 'repair', 'update-prompt')) {
+        $path = Join-Path $global:RtlStateDir "$name.ps1"
+        Remove-PlantedFile $path
+        # PS 5.1 needs UTF-8 with BOM for the decoded Hebrew text.
+        [System.IO.File]::WriteAllText($path, (Get-ComponentBody $name), [System.Text.UTF8Encoding]::new($true))
+    }
+    Write-Log "Update-manager scripts written to $global:RtlStateDir"
+}
+
+function Get-PinnedRsaObject {
+    $pinPath = Join-Path $global:RtlStateDir 'trusted-pubkey.b64'
+    if (-not (Test-Path -LiteralPath $pinPath)) { return $null }
+    $b64 = ([IO.File]::ReadAllText($pinPath)).Trim()
+    $obj = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json
+    $prm = New-Object System.Security.Cryptography.RSAParameters
+    $prm.Modulus  = [Convert]::FromBase64String($obj.Modulus)
+    $prm.Exponent = [Convert]::FromBase64String($obj.Exponent)
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    $rsa.ImportParameters($prm)
+    return $rsa
+}
+
+# The protected repair task: runs repair.ps1 as SYSTEM with no arguments. The
+# signed-in user may start it (read + execute) but cannot change it.
+function Install-RepairTask([string]$UserSid) {
+    $sys = [Environment]::GetFolderPath('System')
+    $repair = Join-Path $global:RtlStateDir 'repair.ps1'
+    $ps = Join-Path $sys 'WindowsPowerShell\v1.0\powershell.exe'
+    # SYSTEM gets the machine environment only, never the user's.
+    $taskArgs = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $repair + '"'
+    $svc = New-Object -ComObject Schedule.Service
+    $svc.Connect()
+    $def = $svc.NewTask(0)
+    $def.RegistrationInfo.Description = 'Re-applies the Claude RTL patch from the locally verified copy. Started on demand by the Claude update manager; takes no input.'
+    $def.Principal.UserId = 'S-1-5-18'
+    $def.Principal.LogonType = 5          # service account
+    $def.Principal.RunLevel = 1           # highest
+    $def.Settings.MultipleInstances = 2   # ignore new while running
+    $def.Settings.ExecutionTimeLimit = 'PT30M'
+    $def.Settings.AllowDemandStart = $true
+    $def.Settings.DisallowStartIfOnBatteries = $false
+    $def.Settings.StopIfGoingOnBatteries = $false
+    $def.Settings.Hidden = $true
+    $act = $def.Actions.Create(0)
+    $act.Path = $ps
+    $act.Arguments = $taskArgs
+    $sddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;$UserSid)"
+    [void]$svc.GetFolder('\').RegisterTaskDefinition('ClaudeRtlPatchRepair', $def, 6, 'SYSTEM', $null, 5, $sddl)
+    Write-Success "Protected repair task 'ClaudeRtlPatchRepair' registered (runs as SYSTEM, no input)."
+}
+
+# Claude's built-in updater freezes the MSIX app after it downloads an update; the
+# update manager takes over. HKLM\SOFTWARE\Policies\Claude is Claude's managed-
+# settings location (value disableAutoUpdates).
+function Set-ClaudeAutoUpdatePolicy([bool]$Disable) {
+    $key = 'HKLM:\SOFTWARE\Policies\Claude'
+    if ($Disable) {
+        if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+        New-ItemProperty -Path $key -Name 'disableAutoUpdates' -PropertyType DWord -Value 1 -Force | Out-Null
+        Write-Success "Claude's built-in auto-update is off (HKLM\SOFTWARE\Policies\Claude\disableAutoUpdates = 1)."
+    } elseif (Test-Path $key) {
+        Remove-ItemProperty -Path $key -Name 'disableAutoUpdates' -ErrorAction SilentlyContinue
+        Write-Success "Claude's built-in auto-update policy removed."
     }
 }
-'@
 
-        # PS 5.1 needs UTF-8 with BOM to parse Unicode text (Hebrew + toast XML) correctly.
-        Remove-PlantedFile $watcherPath
-        [System.IO.File]::WriteAllText($watcherPath, $watcherBody, [System.Text.UTF8Encoding]::new($true))
-        Write-Log "Watcher script written to $watcherPath"
-    } catch {
-        Write-Warn "Save-WatcherScript failed: $($_.Exception.Message)"
+# Everything the update manager needs, installed from an elevated session.
+function Install-UpdateManager {
+    Write-Step "Installing the Claude update manager..."
+    if (-not (Protect-RtlStateDir)) { throw "Cannot secure $global:RtlStateDir." }
+    if ($env:CLAUDE_RTL_TRUSTED_PUBKEY) { Save-TrustedPubkey }
+    if (-not (Get-PinnedRsaObject)) { throw "No pinned public key. Install the RTL patch first." }
+    # The verified copy of patch.ps1 that repair.ps1 runs (patch-local.ps1 + .sig) is
+    # stored by tools/install-update-manager.ps1 or by the shortcut's -Refresh run.
+    if (-not (Test-Path -LiteralPath (Join-Path $global:RtlStateDir 'patch-local.ps1'))) {
+        Write-Warn "No verified local copy yet: unattended repairs start working after the installer or the 'Update Claude RTL' shortcut stores one."
     }
+    Save-ManagerComponents
+    Save-UpdateScript
+
+    $userName = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $consoleUser = Get-MismatchedConsoleUser
+    if ($consoleUser) { $userName = $consoleUser }
+    $userSid = (New-Object System.Security.Principal.NTAccount($userName)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+
+    Install-RepairTask $userSid
+    Install-AutoUpdateTask -NoManager
+    Set-ClaudeAutoUpdatePolicy $true
+    Write-Success "Update manager installed. Claude updates are now offered in a window and applied only when no session is working."
 }
 
 # -----------------------------------------------------------------------------
 # Registers the Scheduled Task that launches the watcher at logon via -File.
 # -----------------------------------------------------------------------------
 function Install-AutoUpdateTask {
+    param([switch]$NoManager)
+    # The watcher is one part of the update manager; install it as a whole.
+    if (-not $NoManager) { Install-UpdateManager; return }
     Write-Step "Installing Auto-Update Watcher (Scheduled Task)..."
 
     if (-not (Test-Path $global:RtlStateFile)) {
@@ -3430,7 +4119,8 @@ function Install-AutoUpdateTask {
     }
 
     # Pin the pubkey BEFORE registering the task (closes the repo-takeover vector).
-    Save-TrustedPubkey
+    # An existing pin is kept as it is when no new key was handed over.
+    if ($env:CLAUDE_RTL_TRUSTED_PUBKEY -or -not (Test-Path (Join-Path $global:RtlStateDir 'trusted-pubkey.b64'))) { Save-TrustedPubkey }
 
     # Write the watcher to disk; the task launches it via -File (not -EncodedCommand).
     Save-WatcherScript
@@ -3463,17 +4153,21 @@ function Install-AutoUpdateTask {
             -MultipleInstances IgnoreNew -StartWhenAvailable `
             -ExecutionTimeLimit ([TimeSpan]::Zero) `
             -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        # Limited: the watcher needs no admin rights. Re-patching goes through the
+        # protected ClaudeRtlPatchRepair task, which takes no input from here.
         $principal = New-ScheduledTaskPrincipal -UserId $userName `
-            -RunLevel Highest -LogonType Interactive
+            -RunLevel Limited -LogonType Interactive
 
+        # A running older watcher keeps its old code (and rights) until it stops.
+        Stop-ScheduledTask -TaskName $global:RtlTaskName -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName $global:RtlTaskName `
             -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
-            -Description "Detects Claude Desktop updates and re-applies the RTL patch automatically." `
+            -Description "Claude update manager: offers Claude updates, applies them when no session is working, and has the RTL patch re-applied." `
             -Force | Out-Null
 
         Start-ScheduledTask -TaskName $global:RtlTaskName -ErrorAction SilentlyContinue
         Write-Success "Scheduled Task '$global:RtlTaskName' installed and started."
-        Write-Success "Watcher logs: $(Join-Path $global:RtlStateDir 'watcher.log')"
+        Write-Success "Watcher logs: %LOCALAPPDATA%\ClaudeRtlPatch\watcher.log (repair task: $(Join-Path $global:RtlStateDir 'repair.log'))"
         if ($identityMismatch) {
             Write-Success "Registered for $userName (the account that uses Claude), not the admin account running this patch."
             Write-Warn "When Claude updates, a UAC prompt for admin approval will appear before the patch is re-applied."
@@ -3487,6 +4181,12 @@ function Install-AutoUpdateTask {
 }
 
 function Uninstall-AutoUpdateTask {
+    Write-Step "Removing the update manager (repair task, policy)..."
+    Try {
+        Unregister-ScheduledTask -TaskName 'ClaudeRtlPatchRepair' -Confirm:$false -ErrorAction SilentlyContinue
+        # Hand updates back to Claude's own updater.
+        Set-ClaudeAutoUpdatePolicy $false
+    } Catch { Write-Warn "Update-manager removal: $($_.Exception.Message)" }
     Write-Step "Removing Auto-Update Watcher..."
     Try {
         $existing = Get-ScheduledTask -TaskName $global:RtlTaskName -ErrorAction SilentlyContinue
@@ -3515,8 +4215,12 @@ function Uninstall-AutoUpdateTask {
 # otherwise @{ Path = $null; Version = <newest found, or $null> } for an accurate error.
 function Resolve-NodeExe {
     $candidates = @(Join-Path $env:ProgramFiles 'nodejs\node.exe')
-    $onPath = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($onPath) { $candidates += $onPath.Source }
+    # Silent (unattended, SYSTEM) runs use the admin-owned install only: a node.exe
+    # found on PATH may sit in a folder the user can write.
+    if (-not $Silent) {
+        $onPath = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($onPath) { $candidates += $onPath.Source }
+    }
 
     $minVer = [version]$script:MinNodeVersion
     $newest = $null
@@ -3993,7 +4697,10 @@ function Install-PatchCore {
         # Always write the local verified-update helper, and refresh any existing
         # shortcut that still points at "irm install.ps1 | iex" to use it instead.
         Save-UpdateScript
-        try {
+        # Keep the update-manager scripts in step with this release (files only; the
+        # tasks are registered by Install-UpdateManager).
+        if (Test-Path -LiteralPath (Join-Path $global:RtlStateDir 'repair.ps1')) { Save-ManagerComponents }
+        if (-not $Silent) { try {
             # Check both spots Create-UpdateShortcut uses: the current desktop and the
             # Public desktop (identity mismatch, #34).
             $shortcutName = "Update Claude RTL.lnk"
@@ -4006,7 +4713,7 @@ function Install-PatchCore {
             }
         } catch {
             Write-Warn "Update-shortcut refresh failed: $($_.Exception.Message)"
-        }
+        } }
 
         Start-ClaudeServices
 
@@ -4039,7 +4746,9 @@ function Install-PatchCore {
             Write-Host ""
         }
 
-        if (-not $Auto) {
+        if ($Silent) {
+            # Unattended run: tasks are left exactly as they are.
+        } elseif (-not $Auto) {
             $autoPatchPrompt = Read-Host "Do you want to enable Auto Re-Patch after each Claude update? (Y/n)"
             if ($autoPatchPrompt -ne 'n' -and $autoPatchPrompt -ne 'N') {
                 try { Install-AutoUpdateTask } catch { Write-Warn "Failed to install auto-patch task: $($_.Exception.Message)" }
@@ -4310,8 +5019,17 @@ if ($Auto) {
         $exitCode = 1
     }
 
-    Write-Host "`nPress Enter to close this window..." -ForegroundColor DarkGray
-    $null = Read-Host
+    if (-not $Silent) {
+        Write-Host "`nPress Enter to close this window..." -ForegroundColor DarkGray
+        $null = Read-Host
+    }
+    Exit $exitCode
+} elseif ($InstallUpdateManager) {
+    $exitCode = 0
+    try { Install-UpdateManager } catch {
+        Write-Host "`n[!] Update manager install failed: $($_.Exception.Message)" -ForegroundColor Red
+        $exitCode = 1
+    }
     Exit $exitCode
 } else {
     Show-Menu

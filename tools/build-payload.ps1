@@ -95,6 +95,50 @@ if (-not [regex]::IsMatch($updated, $helperPattern)) {
 $helperEvaluator = [System.Text.RegularExpressions.MatchEvaluator] { param($m) $helperBlock }
 $updated = [regex]::Replace($updated, $helperPattern, $helperEvaluator, [System.Text.RegularExpressions.RegexOptions]::Singleline)
 
+# PowerShell components (src/components/*.ps1): watcher, protected repair runner and
+# the update prompt. Each lands between "# --- CLAUDE RTL COMPONENT <name> START/END ---"
+# markers inside a here-string in patch.ps1. Hebrew is allowed only inside H('...')
+# calls and is written as \uXXXX escapes, which Heb turns back at run time.
+function ConvertTo-EscapedComponent([string]$name, [string]$text) {
+    $text = $text.TrimStart([char]0xFEFF)
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($ch in $m.Groups[1].Value.ToCharArray()) {
+            if ([int]$ch -gt 127) { [void]$sb.AppendFormat('\u{0:x4}', [int]$ch) } else { [void]$sb.Append($ch) }
+        }
+        "(Heb '" + $sb.ToString() + "')"
+    }
+    $out = [regex]::Replace($text, "\(Heb '([^']*)'\)", $evaluator)
+    if ($out -match '[^\x00-\x7F]') {
+        Write-Host "src/components/$name.ps1 has non-ASCII text outside (Heb '...') - aborting." -ForegroundColor Red; exit 1
+    }
+    if ($out -match "(?m)^'@") {
+        Write-Host "src/components/$name.ps1 has a line starting with '@ - aborting." -ForegroundColor Red; exit 1
+    }
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($out, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) {
+        Write-Host "src/components/$name.ps1 does not parse: $($errors[0].Message) (line $($errors[0].Extent.StartLineNumber))" -ForegroundColor Red; exit 1
+    }
+    return $out.TrimEnd("`n")
+}
+
+foreach ($name in @('watcher', 'repair', 'update-prompt')) {
+    $srcPath = Join-Path $repoRoot "src\components\$name.ps1"
+    if (-not (Test-Path $srcPath)) { Write-Host "Missing: $srcPath" -ForegroundColor Red; exit 1 }
+    $comp = ConvertTo-EscapedComponent $name (Read-Lf $srcPath)
+    $start = "# --- CLAUDE RTL COMPONENT $name START ---"
+    $end   = "# --- CLAUDE RTL COMPONENT $name END ---"
+    $compBlock = $start + "`n" + $comp + "`n" + $end
+    $compPattern = '(?s)' + [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
+    if (-not [regex]::IsMatch($updated, $compPattern)) {
+        Write-Host "COMPONENT $name markers not found in patch.ps1" -ForegroundColor Red; exit 1
+    }
+    $compEvaluator = [System.Text.RegularExpressions.MatchEvaluator] { param($m) $compBlock }.GetNewClosure()
+    $updated = [regex]::Replace($updated, $compPattern, $compEvaluator, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+}
+
 # Sanity guard: never write a suspiciously small file (protects against any
 # upstream failure that could otherwise truncate patch.ps1).
 if ($updated.Length -lt ($patch.Length / 2)) {
