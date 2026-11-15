@@ -23,7 +23,7 @@ param(
 
 # Release build number. repair.ps1 refuses a downloaded patch.ps1 whose build is
 # lower than the verified local copy (rollback protection). Bump on every release.
-$script:PatchBuild = 2026111301
+$script:PatchBuild = 2026111501
 if ($Silent) { $Auto = $true }
 
 # Env-var fallback for `irm | iex` invocations where param binding is not possible.
@@ -3136,6 +3136,10 @@ $script:UserDir      = Join-Path $env:LOCALAPPDATA 'ClaudeRtlPatch'
 $script:UserState    = Join-Path $script:UserDir 'update-manager.json'
 $script:ChoiceFile   = Join-Path $script:UserDir 'update-choice.json'
 $script:LogFile      = Join-Path $script:UserDir 'watcher.log'
+$script:ProgressFile   = Join-Path $script:UserDir 'update-progress.json'
+$script:ProgressScript = Join-Path $script:StateDir 'update-progress.ps1'
+# First-run seconds per update stage; afterwards learned from real updates.
+$script:DefaultStageSecs = [ordered]@{ close = 10; install = 150; rtl = 90; open = 20 }
 $script:RepairTask   = 'ClaudeRtlPatchRepair'
 $script:FeedUrl      = 'https://api.anthropic.com/api/desktop/win32/x64/msix/latest'
 $script:CheckEveryMin      = 60
@@ -3172,7 +3176,8 @@ $script:Deps = @{
     ShowPrompt        = { param($new, $cur) Show-UpdatePrompt $new $cur }
     Toast             = { param($title, $body) Show-Toast $title $body }
     StopClaude        = { Stop-AllClaude }
-    AddPackage        = { param($url) Add-AppxPackage -Path $url -ForceApplicationShutdown -ErrorAction Stop }
+    AddPackage        = { param($url, $onProgress) Add-PackageWithProgress $url $onProgress }
+    ShowProgress      = { param($ver) Show-UpdateProgress $ver }
     RunRepair         = { Invoke-RepairTask }
     StartProfiles     = { param($profiles) Start-ClaudeProfiles $profiles }
     StuckSignal       = { Test-UpdateStuck }
@@ -3214,7 +3219,7 @@ function ConvertFrom-Feed($Obj) {
 # ---------------------------------------------------------------------------
 function Read-ManagerState {
     $default = @{ pendingVersion = $null; pendingUrl = $null; mode = $null; at = $null; snoozeUntil = $null;
-                  promptedAt = $null; lastCheck = $null; busyNotified = $false; lastResult = $null }
+                  promptedAt = $null; lastCheck = $null; busyNotified = $false; lastResult = $null; stageSecs = $null }
     if (-not (Test-Path -LiteralPath $script:UserState)) { return $default }
     try {
         $o = Get-Content -LiteralPath $script:UserState -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -3419,6 +3424,88 @@ function Show-UpdatePrompt([string]$NewVersion, [string]$CurrentVersion) {
         '-File', "`"$script:PromptScript`"", '-NewVersion', $NewVersion, '-CurrentVersion', $CurrentVersion)
 }
 
+function Show-UpdateProgress([string]$Version) {
+    if (-not (Test-Path -LiteralPath $script:ProgressScript)) {
+        Write-WLog 'update-progress.ps1 missing'
+        & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05de\u05ea\u05d7\u05d9\u05dc')) ((Heb 'Claude \u05d9\u05d9\u05e1\u05d2\u05e8 \u05dc\u05db\u05de\u05d4 \u05d3\u05e7\u05d5\u05ea, \u05d9\u05ea\u05e2\u05d3\u05db\u05df \u05dc\u05d2\u05e8\u05e1\u05d4 ') + $Version + (Heb ' \u05d5\u05d9\u05d7\u05d6\u05d5\u05e8 \u05e2\u05dd RTL.'))
+        return
+    }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$script:ProgressScript`"", '-Version', $Version)
+}
+
+# Add-AppxPackage in its own runspace so its progress records (percent of the
+# download and install) can be read while it runs. Throws like the cmdlet does.
+function Add-PackageWithProgress([string]$Url, $OnProgress) {
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddCommand('Add-AppxPackage').AddParameter('Path', $Url).AddParameter('ForceApplicationShutdown').AddParameter('ErrorAction', 'Stop')
+        $h = $ps.BeginInvoke()
+        $last = -1
+        while (-not $h.IsCompleted) {
+            Start-Sleep -Milliseconds 700
+            $n = $ps.Streams.Progress.Count
+            if ($n -gt 0 -and $OnProgress) {
+                $pct = [int]$ps.Streams.Progress[$n - 1].PercentComplete
+                if ($pct -ge 0 -and $pct -ne $last) { $last = $pct; & $OnProgress $pct }
+            }
+        }
+        [void]$ps.EndInvoke($h)
+        if ($ps.Streams.Error.Count -gt 0) { throw $ps.Streams.Error[0].Exception }
+    } finally { $ps.Dispose() }
+}
+
+# Seconds per stage: the defaults, replaced by what earlier updates measured.
+function Get-StageEstimates($State) {
+    $est = [ordered]@{}
+    foreach ($k in $script:DefaultStageSecs.Keys) {
+        $v = $script:DefaultStageSecs[$k]
+        $saved = $null
+        if ($State.stageSecs -is [hashtable]) { $saved = $State.stageSecs[$k] }
+        elseif ($State.stageSecs -and $State.stageSecs.PSObject.Properties[$k]) { $saved = $State.stageSecs.$k }
+        if ($saved -as [double]) { $v = [Math]::Max(3, [Math]::Min(1800, [double]$saved)) }
+        $est[$k] = [int]$v
+    }
+    return $est
+}
+
+# Halfway between the old estimate and what this update took, per measured stage.
+function Update-StageEstimates($Est, $Measured) {
+    $out = @{}
+    foreach ($k in $Est.Keys) {
+        $v = [double]$Est[$k]
+        if ($Measured.ContainsKey($k)) { $v = ($v + [double]$Measured[$k]) / 2 }
+        $out[$k] = [int][Math]::Round([Math]::Max(3, [Math]::Min(1800, $v)))
+    }
+    return $out
+}
+
+# Rewrites update-progress.json for the progress window and times each stage.
+function Write-UpdateProgress($Prog, [string]$Stage, $StagePercent = $null, [string]$Status = 'running', [string]$Message = '') {
+    $now = Get-Date
+    if ($Stage -and $Stage -ne $Prog.stage) {
+        if ($Prog.stage) { $Prog.measured[$Prog.stage] = ($now - $Prog.stageStartedAt).TotalSeconds }
+        $Prog.stage = $Stage; $Prog.stageStartedAt = $now
+    }
+    if ($Status -ne 'running' -and -not $Prog.measured.ContainsKey($Prog.stage)) {
+        $Prog.measured[$Prog.stage] = ($now - $Prog.stageStartedAt).TotalSeconds
+    }
+    $names = @($Prog.est.Keys)
+    $doc = [ordered]@{
+        version = $Prog.version; pid = $PID; status = $Status; message = $Message
+        stages = @(foreach ($k in $names) { [ordered]@{ name = $k; est = $Prog.est[$k] } })
+        stageIndex = [array]::IndexOf($names, $Prog.stage); stageStart = $Prog.stageStartedAt.ToString('o')
+        stagePercent = $StagePercent
+    }
+    # Write then rename, so the window never reads half a file.
+    try {
+        $tmp = "$script:ProgressFile.tmp"
+        $doc | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $script:ProgressFile -Force
+    } catch {}
+}
+
 # ---------------------------------------------------------------------------
 # The update itself
 # ---------------------------------------------------------------------------
@@ -3429,12 +3516,16 @@ function Invoke-ClaudeUpdate($State, [string]$Why) {
     try {
         try { $locked = $launcherLock.WaitOne([TimeSpan]::FromMinutes(12)) } catch [Threading.AbandonedMutexException] { $locked = $true }
         Write-WLog "Updating Claude to $label ($Why)."
+        $prog = @{ version = $label; est = (Get-StageEstimates $State); stage = $null; stageStartedAt = $null; measured = @{} }
+        Write-UpdateProgress $prog 'close'
+        & $script:Deps.ShowProgress $label
         $profiles = Get-OpenProfiles (& $script:Deps.ClaudeMainProcs)
-        & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05de\u05ea\u05d7\u05d9\u05dc')) ((Heb 'Claude \u05d9\u05d9\u05e1\u05d2\u05e8 \u05dc\u05db\u05d3\u05e7\u05d4, \u05d9\u05ea\u05e2\u05d3\u05db\u05df \u05dc\u05d2\u05e8\u05e1\u05d4 ') + $label + (Heb ' \u05d5\u05d9\u05d7\u05d6\u05d5\u05e8 \u05e2\u05dd RTL.'))
         & $script:Deps.StopClaude
+        Write-UpdateProgress $prog 'install'
+        $onProgress = { param($pct) Write-UpdateProgress $prog 'install' $pct }
         $installed = $false
         for ($try = 1; $try -le 2 -and -not $installed; $try++) {
-            try { & $script:Deps.AddPackage $State.pendingUrl; $installed = $true }
+            try { & $script:Deps.AddPackage $State.pendingUrl $onProgress; $installed = $true }
             catch {
                 Write-WLog "Add-AppxPackage attempt $try failed: $($_.Exception.Message)"
                 & $script:Deps.StopClaude
@@ -3443,17 +3534,24 @@ function Invoke-ClaudeUpdate($State, [string]$Why) {
         }
         if (-not $installed) {
             $State.lastResult = 'install-failed'
-            & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05e0\u05db\u05e9\u05dc')) ((Heb 'Windows \u05dc\u05d0 \u05d4\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05e2\u05d3\u05db\u05d5\u05df. Claude \u05e0\u05e4\u05ea\u05d7 \u05d1\u05d2\u05e8\u05e1\u05d4 \u05d4\u05e7\u05d9\u05d9\u05de\u05ea. \u05e4\u05e8\u05d8\u05d9\u05dd \u05d1-watcher.log.'))
+            Write-UpdateProgress $prog 'open'
             & $script:Deps.StartProfiles $profiles
+            Write-UpdateProgress $prog 'open' $null 'failed' ((Heb 'Windows \u05dc\u05d0 \u05d4\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05e2\u05d3\u05db\u05d5\u05df. Claude \u05e0\u05e4\u05ea\u05d7 \u05d1\u05d2\u05e8\u05e1\u05d4 \u05d4\u05e7\u05d9\u05d9\u05de\u05ea.'))
+            & $script:Deps.Toast ((Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude \u05e0\u05db\u05e9\u05dc')) ((Heb 'Windows \u05dc\u05d0 \u05d4\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05e2\u05d3\u05db\u05d5\u05df. Claude \u05e0\u05e4\u05ea\u05d7 \u05d1\u05d2\u05e8\u05e1\u05d4 \u05d4\u05e7\u05d9\u05d9\u05de\u05ea. \u05e4\u05e8\u05d8\u05d9\u05dd \u05d1-watcher.log.'))
             return $false
         }
+        Write-UpdateProgress $prog 'rtl'
         $repair = & $script:Deps.RunRepair
         Write-WLog "Repair task: $($repair.Result) $($repair.Message)"
+        Write-UpdateProgress $prog 'open'
         & $script:Deps.StartProfiles $profiles
         if ($repair.Result -in @('ok', 'already')) {
+            Write-UpdateProgress $prog 'open' $null 'done' ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df \u05dc\u05d2\u05e8\u05e1\u05d4 ') + $label + (Heb ' \u05d5\u05e0\u05e4\u05ea\u05d7 \u05e2\u05dd RTL.'))
+            $State.stageSecs = Update-StageEstimates $prog.est $prog.measured
             & $script:Deps.Toast ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df')) ((Heb '\u05d2\u05e8\u05e1\u05d4 ') + $label + (Heb ' \u05de\u05d5\u05ea\u05e7\u05e0\u05ea, \u05d5\u05d4-RTL \u05d4\u05d5\u05d7\u05dc \u05de\u05d7\u05d3\u05e9.'))
             $State.lastResult = 'ok'
         } else {
+            Write-UpdateProgress $prog 'open' $null 'failed' ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df, \u05d0\u05d1\u05dc \u05d4-RTL \u05dc\u05d0 \u05d4\u05d5\u05d7\u05dc. \u05d0\u05e4\u05e9\u05e8 \u05dc\u05d4\u05e8\u05d9\u05e5 \u05d0\u05ea \u05e7\u05d9\u05e6\u05d5\u05e8 \u05d4\u05d3\u05e8\u05da Update Claude RTL.'))
             & $script:Deps.Toast ((Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df, \u05d4-RTL \u05dc\u05d0 \u05d4\u05d5\u05d7\u05dc')) ((Heb '\u05ea\u05d5\u05e6\u05d0\u05ea \u05d4\u05ea\u05d9\u05e7\u05d5\u05df: ') + $repair.Result + (Heb '. \u05d0\u05e4\u05e9\u05e8 \u05dc\u05d4\u05e8\u05d9\u05e5 \u05d0\u05ea \u05e7\u05d9\u05e6\u05d5\u05e8 \u05d4\u05d3\u05e8\u05da Update Claude RTL.'))
             $State.lastResult = "repair-$($repair.Result)"
         }
@@ -4004,6 +4102,170 @@ if ($MyInvocation.InvocationName -ne '.') {
 }
 # --- CLAUDE RTL COMPONENT update-prompt END ---
 '@ }
+        'update-progress' { return @'
+# --- CLAUDE RTL COMPONENT update-progress START ---
+# Claude RTL Patch -- update progress window (update-progress.ps1).
+#
+# Started by watcher.ps1 (signed-in user, no admin rights) when a Claude update
+# begins. Reads update-progress.json, which the watcher rewrites at every stage and
+# during the install, and shows the stage, a progress bar and when Claude should be
+# open again. Closing the window does not stop the update. The window closes by itself
+# when the update ends or when the watcher process is gone.
+#
+# Hebrew text appears only inside (Heb '...') calls (turned into \u escapes by the build).
+
+param([ValidatePattern('^(\d+(\.\d+){1,3})?$')][string]$Version = '')
+
+function Heb([string]$s) { return [regex]::Unescape($s) }
+
+$script:ProgressFile = Join-Path $env:LOCALAPPDATA 'ClaudeRtlPatch\update-progress.json'
+
+function Get-StageTitle([string]$Name) {
+    switch ($Name) {
+        'close'   { return (Heb '\u05e1\u05d5\u05d2\u05e8 \u05d0\u05ea \u05d7\u05dc\u05d5\u05e0\u05d5\u05ea Claude') }
+        'install' { return (Heb '\u05de\u05d5\u05e8\u05d9\u05d3 \u05d5\u05de\u05ea\u05e7\u05d9\u05df \u05d0\u05ea \u05d4\u05d2\u05e8\u05e1\u05d4 \u05d4\u05d7\u05d3\u05e9\u05d4') }
+        'rtl'     { return (Heb '\u05de\u05d7\u05d9\u05dc \u05de\u05d7\u05d3\u05e9 \u05d0\u05ea \u05d4-RTL') }
+        'open'    { return (Heb '\u05e4\u05d5\u05ea\u05d7 \u05d0\u05ea Claude') }
+    }
+    return $Name
+}
+
+function ConvertTo-LocalTime($Value) {
+    if (-not $Value) { return $null }
+    try {
+        $d = [datetime]::Parse("$Value", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        if ($d.Kind -eq 'Utc') { return $d.ToLocalTime() }
+        return $d
+    } catch { return $null }
+}
+
+# Overall percent and seconds left, from the stage estimates and the time (or the real
+# install progress, when Windows reports it) spent in the current stage.
+function Get-ProgressView($P, [datetime]$Now) {
+    $stages = @($P.stages)
+    $idx = [Math]::Max(0, [Math]::Min($stages.Count - 1, [int]$P.stageIndex))
+    $total = 0.0; foreach ($s in $stages) { $total += [double]$s.est }
+    if ($total -le 0) { $total = 1 }
+    $before = 0.0; for ($i = 0; $i -lt $idx; $i++) { $before += [double]$stages[$i].est }
+    $after = 0.0;  for ($i = $idx + 1; $i -lt $stages.Count; $i++) { $after += [double]$stages[$i].est }
+    $cur = [Math]::Max(1.0, [double]$stages[$idx].est)
+    $start = ConvertTo-LocalTime $P.stageStart
+    $elapsed = if ($start) { [Math]::Max(0.0, ($Now - $start).TotalSeconds) } else { 0.0 }
+    $real = $null
+    if ($null -ne $P.stagePercent -and "$($P.stagePercent)" -ne '') { $real = [double]$P.stagePercent }
+    if ($real -ne $null -and $real -ge 5) {
+        $frac = [Math]::Min(1.0, $real / 100)
+        $curLeft = if ($frac -lt 1) { $elapsed * (1 - $frac) / $frac } else { 0 }
+    } else {
+        $frac = [Math]::Min(0.95, $elapsed / $cur)
+        $curLeft = [Math]::Max(5.0, $cur - $elapsed)
+    }
+    $view = @{
+        Percent = [int][Math]::Round(100 * ($before + $cur * $frac) / $total)
+        SecondsLeft = [int][Math]::Ceiling($curLeft + $after)
+        Step = $idx + 1; Steps = $stages.Count; Title = (Get-StageTitle "$($stages[$idx].name)")
+    }
+    if ("$($P.status)" -ne 'running') { $view.Percent = 100; $view.SecondsLeft = 0 }
+    return $view
+}
+
+function Format-TimeLeft([int]$Seconds) {
+    if ($Seconds -le 10) { return (Heb 'Claude \u05d9\u05d9\u05e4\u05ea\u05d7 \u05d1\u05e2\u05d5\u05d3 \u05db\u05de\u05d4 \u05e9\u05e0\u05d9\u05d5\u05ea') }
+    if ($Seconds -lt 60) { return (Heb 'Claude \u05d9\u05d9\u05e4\u05ea\u05d7 \u05d1\u05e2\u05d5\u05d3 \u05e4\u05d7\u05d5\u05ea \u05de\u05d3\u05e7\u05d4') }
+    $min = [int][Math]::Ceiling($Seconds / 60)
+    if ($min -eq 1) { return (Heb 'Claude \u05d9\u05d9\u05e4\u05ea\u05d7 \u05d1\u05e2\u05d5\u05d3 \u05db\u05d3\u05e7\u05d4') }
+    return (Heb 'Claude \u05d9\u05d9\u05e4\u05ea\u05d7 \u05d1\u05e2\u05d5\u05d3 \u05db-') + $min + (Heb ' \u05d3\u05e7\u05d5\u05ea')
+}
+
+function Read-Progress {
+    try { return Get-Content -LiteralPath $script:ProgressFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+}
+
+function Show-Window {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = (Heb '\u05e2\u05d3\u05db\u05d5\u05df Claude')
+    $form.RightToLeft = 'Yes'
+    $form.RightToLeftLayout = $true
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false; $form.MinimizeBox = $true
+    $form.StartPosition = 'CenterScreen'
+    $form.TopMost = $true
+    $form.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $form.ClientSize = New-Object System.Drawing.Size(440, 178)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = (Heb '\u05de\u05e2\u05d3\u05db\u05df \u05d0\u05ea Claude') + $(if ($Version) { (Heb ' \u05dc\u05d2\u05e8\u05e1\u05d4 ') + $Version } else { '' })
+    $title.Font = New-Object System.Drawing.Font('Segoe UI', 12, [System.Drawing.FontStyle]::Bold)
+    $title.SetBounds(16, 12, 408, 26)
+    $form.Controls.Add($title)
+
+    $stage = New-Object System.Windows.Forms.Label
+    $stage.SetBounds(16, 44, 408, 22)
+    $form.Controls.Add($stage)
+
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Style = 'Continuous'; $bar.Minimum = 0; $bar.Maximum = 100
+    $bar.RightToLeftLayout = $true      # fills from the right, like the text reads
+    $bar.SetBounds(16, 72, 408, 22)
+    $form.Controls.Add($bar)
+
+    $eta = New-Object System.Windows.Forms.Label
+    $eta.SetBounds(16, 102, 408, 40)
+    $form.Controls.Add($eta)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = (Heb '\u05d0\u05e4\u05e9\u05e8 \u05dc\u05e1\u05d2\u05d5\u05e8 \u05d0\u05ea \u05d4\u05d7\u05dc\u05d5\u05df. \u05d4\u05e2\u05d3\u05db\u05d5\u05df \u05d9\u05de\u05e9\u05d9\u05da \u05d1\u05e8\u05e7\u05e2.')
+    $hint.ForeColor = [System.Drawing.Color]::Gray
+    $hint.SetBounds(16, 148, 408, 20)
+    $form.Controls.Add($hint)
+
+    $script:UiForm = $form; $script:UiStage = $stage; $script:UiBar = $bar; $script:UiEta = $eta; $script:UiHint = $hint
+    $script:UiEndAt = $null; $script:UiLastRead = Get-Date
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 500
+    $timer.Add_Tick({
+        $now = Get-Date
+        if ($script:UiEndAt) { if ($now -ge $script:UiEndAt) { $script:UiForm.Close() }; return }
+        $p = Read-Progress
+        if (-not $p) {
+            # A read can fail now and then; give up only after a minute without one.
+            if (($now - $script:UiLastRead).TotalSeconds -gt 60) { $script:UiForm.Close() }
+            return
+        }
+        $script:UiLastRead = $now
+        $v = Get-ProgressView $p $now
+        $script:UiBar.Value = [Math]::Max(0, [Math]::Min(100, $v.Percent))
+        if ("$($p.status)" -eq 'running') {
+            $script:UiStage.Text = (Heb '\u05e9\u05dc\u05d1 ') + $v.Step + (Heb ' \u05de\u05ea\u05d5\u05da ') + $v.Steps + ': ' + $v.Title
+            $script:UiEta.Text = Format-TimeLeft $v.SecondsLeft
+            if ($p.pid -and -not (Get-Process -Id ([int]$p.pid) -ErrorAction SilentlyContinue)) { $script:UiForm.Close() }
+        } else {
+            $failed = "$($p.status)" -eq 'failed'
+            $script:UiHint.Visible = $false
+            $script:UiStage.Text = if ($failed) { (Heb '\u05d4\u05e2\u05d3\u05db\u05d5\u05df \u05dc\u05d0 \u05d4\u05d5\u05e9\u05dc\u05dd') } else { (Heb '\u05d4\u05e1\u05ea\u05d9\u05d9\u05dd') }
+            $script:UiEta.Text = if ($p.message) { "$($p.message)" } elseif ($failed) { '' } else { (Heb 'Claude \u05e2\u05d5\u05d3\u05db\u05df \u05d5\u05e0\u05e4\u05ea\u05d7.') }
+            $script:UiEndAt = $now.AddSeconds($(if ($failed) { 15 } else { 5 }))
+        }
+    })
+    $form.Add_Shown({ $timer.Start() })
+    [void]$form.ShowDialog()
+    $timer.Dispose()
+}
+
+# Dot-sourcing (tests) loads the functions only.
+if ($MyInvocation.InvocationName -ne '.') {
+    $mutex = New-Object Threading.Mutex($false, 'Local\ClaudeRtlUpdateProgress')
+    $owned = $false
+    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) { exit 0 }     # a progress window is already on screen
+    try { Show-Window } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+}
+# --- CLAUDE RTL COMPONENT update-progress END ---
+'@ }
     }
     throw "Unknown component $Name"
 }
@@ -4012,7 +4274,7 @@ function Save-ManagerComponents {
     if (-not (Protect-RtlStateDir)) {
         throw "State dir could not be secured; refusing to write the update-manager scripts."
     }
-    foreach ($name in @('watcher', 'repair', 'update-prompt')) {
+    foreach ($name in @('watcher', 'repair', 'update-prompt', 'update-progress')) {
         $path = Join-Path $global:RtlStateDir "$name.ps1"
         Remove-PlantedFile $path
         # PS 5.1 needs UTF-8 with BOM for the decoded Hebrew text.

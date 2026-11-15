@@ -27,6 +27,10 @@ $script:UserDir      = Join-Path $env:LOCALAPPDATA 'ClaudeRtlPatch'
 $script:UserState    = Join-Path $script:UserDir 'update-manager.json'
 $script:ChoiceFile   = Join-Path $script:UserDir 'update-choice.json'
 $script:LogFile      = Join-Path $script:UserDir 'watcher.log'
+$script:ProgressFile   = Join-Path $script:UserDir 'update-progress.json'
+$script:ProgressScript = Join-Path $script:StateDir 'update-progress.ps1'
+# First-run seconds per update stage; afterwards learned from real updates.
+$script:DefaultStageSecs = [ordered]@{ close = 10; install = 150; rtl = 90; open = 20 }
 $script:RepairTask   = 'ClaudeRtlPatchRepair'
 $script:FeedUrl      = 'https://api.anthropic.com/api/desktop/win32/x64/msix/latest'
 $script:CheckEveryMin      = 60
@@ -63,7 +67,8 @@ $script:Deps = @{
     ShowPrompt        = { param($new, $cur) Show-UpdatePrompt $new $cur }
     Toast             = { param($title, $body) Show-Toast $title $body }
     StopClaude        = { Stop-AllClaude }
-    AddPackage        = { param($url) Add-AppxPackage -Path $url -ForceApplicationShutdown -ErrorAction Stop }
+    AddPackage        = { param($url, $onProgress) Add-PackageWithProgress $url $onProgress }
+    ShowProgress      = { param($ver) Show-UpdateProgress $ver }
     RunRepair         = { Invoke-RepairTask }
     StartProfiles     = { param($profiles) Start-ClaudeProfiles $profiles }
     StuckSignal       = { Test-UpdateStuck }
@@ -105,7 +110,7 @@ function ConvertFrom-Feed($Obj) {
 # ---------------------------------------------------------------------------
 function Read-ManagerState {
     $default = @{ pendingVersion = $null; pendingUrl = $null; mode = $null; at = $null; snoozeUntil = $null;
-                  promptedAt = $null; lastCheck = $null; busyNotified = $false; lastResult = $null }
+                  promptedAt = $null; lastCheck = $null; busyNotified = $false; lastResult = $null; stageSecs = $null }
     if (-not (Test-Path -LiteralPath $script:UserState)) { return $default }
     try {
         $o = Get-Content -LiteralPath $script:UserState -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -310,6 +315,88 @@ function Show-UpdatePrompt([string]$NewVersion, [string]$CurrentVersion) {
         '-File', "`"$script:PromptScript`"", '-NewVersion', $NewVersion, '-CurrentVersion', $CurrentVersion)
 }
 
+function Show-UpdateProgress([string]$Version) {
+    if (-not (Test-Path -LiteralPath $script:ProgressScript)) {
+        Write-WLog 'update-progress.ps1 missing'
+        & $script:Deps.Toast ((Heb 'עדכון Claude מתחיל')) ((Heb 'Claude ייסגר לכמה דקות, יתעדכן לגרסה ') + $Version + (Heb ' ויחזור עם RTL.'))
+        return
+    }
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$script:ProgressScript`"", '-Version', $Version)
+}
+
+# Add-AppxPackage in its own runspace so its progress records (percent of the
+# download and install) can be read while it runs. Throws like the cmdlet does.
+function Add-PackageWithProgress([string]$Url, $OnProgress) {
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddCommand('Add-AppxPackage').AddParameter('Path', $Url).AddParameter('ForceApplicationShutdown').AddParameter('ErrorAction', 'Stop')
+        $h = $ps.BeginInvoke()
+        $last = -1
+        while (-not $h.IsCompleted) {
+            Start-Sleep -Milliseconds 700
+            $n = $ps.Streams.Progress.Count
+            if ($n -gt 0 -and $OnProgress) {
+                $pct = [int]$ps.Streams.Progress[$n - 1].PercentComplete
+                if ($pct -ge 0 -and $pct -ne $last) { $last = $pct; & $OnProgress $pct }
+            }
+        }
+        [void]$ps.EndInvoke($h)
+        if ($ps.Streams.Error.Count -gt 0) { throw $ps.Streams.Error[0].Exception }
+    } finally { $ps.Dispose() }
+}
+
+# Seconds per stage: the defaults, replaced by what earlier updates measured.
+function Get-StageEstimates($State) {
+    $est = [ordered]@{}
+    foreach ($k in $script:DefaultStageSecs.Keys) {
+        $v = $script:DefaultStageSecs[$k]
+        $saved = $null
+        if ($State.stageSecs -is [hashtable]) { $saved = $State.stageSecs[$k] }
+        elseif ($State.stageSecs -and $State.stageSecs.PSObject.Properties[$k]) { $saved = $State.stageSecs.$k }
+        if ($saved -as [double]) { $v = [Math]::Max(3, [Math]::Min(1800, [double]$saved)) }
+        $est[$k] = [int]$v
+    }
+    return $est
+}
+
+# Halfway between the old estimate and what this update took, per measured stage.
+function Update-StageEstimates($Est, $Measured) {
+    $out = @{}
+    foreach ($k in $Est.Keys) {
+        $v = [double]$Est[$k]
+        if ($Measured.ContainsKey($k)) { $v = ($v + [double]$Measured[$k]) / 2 }
+        $out[$k] = [int][Math]::Round([Math]::Max(3, [Math]::Min(1800, $v)))
+    }
+    return $out
+}
+
+# Rewrites update-progress.json for the progress window and times each stage.
+function Write-UpdateProgress($Prog, [string]$Stage, $StagePercent = $null, [string]$Status = 'running', [string]$Message = '') {
+    $now = Get-Date
+    if ($Stage -and $Stage -ne $Prog.stage) {
+        if ($Prog.stage) { $Prog.measured[$Prog.stage] = ($now - $Prog.stageStartedAt).TotalSeconds }
+        $Prog.stage = $Stage; $Prog.stageStartedAt = $now
+    }
+    if ($Status -ne 'running' -and -not $Prog.measured.ContainsKey($Prog.stage)) {
+        $Prog.measured[$Prog.stage] = ($now - $Prog.stageStartedAt).TotalSeconds
+    }
+    $names = @($Prog.est.Keys)
+    $doc = [ordered]@{
+        version = $Prog.version; pid = $PID; status = $Status; message = $Message
+        stages = @(foreach ($k in $names) { [ordered]@{ name = $k; est = $Prog.est[$k] } })
+        stageIndex = [array]::IndexOf($names, $Prog.stage); stageStart = $Prog.stageStartedAt.ToString('o')
+        stagePercent = $StagePercent
+    }
+    # Write then rename, so the window never reads half a file.
+    try {
+        $tmp = "$script:ProgressFile.tmp"
+        $doc | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $script:ProgressFile -Force
+    } catch {}
+}
+
 # ---------------------------------------------------------------------------
 # The update itself
 # ---------------------------------------------------------------------------
@@ -320,12 +407,16 @@ function Invoke-ClaudeUpdate($State, [string]$Why) {
     try {
         try { $locked = $launcherLock.WaitOne([TimeSpan]::FromMinutes(12)) } catch [Threading.AbandonedMutexException] { $locked = $true }
         Write-WLog "Updating Claude to $label ($Why)."
+        $prog = @{ version = $label; est = (Get-StageEstimates $State); stage = $null; stageStartedAt = $null; measured = @{} }
+        Write-UpdateProgress $prog 'close'
+        & $script:Deps.ShowProgress $label
         $profiles = Get-OpenProfiles (& $script:Deps.ClaudeMainProcs)
-        & $script:Deps.Toast ((Heb 'עדכון Claude מתחיל')) ((Heb 'Claude ייסגר לכדקה, יתעדכן לגרסה ') + $label + (Heb ' ויחזור עם RTL.'))
         & $script:Deps.StopClaude
+        Write-UpdateProgress $prog 'install'
+        $onProgress = { param($pct) Write-UpdateProgress $prog 'install' $pct }
         $installed = $false
         for ($try = 1; $try -le 2 -and -not $installed; $try++) {
-            try { & $script:Deps.AddPackage $State.pendingUrl; $installed = $true }
+            try { & $script:Deps.AddPackage $State.pendingUrl $onProgress; $installed = $true }
             catch {
                 Write-WLog "Add-AppxPackage attempt $try failed: $($_.Exception.Message)"
                 & $script:Deps.StopClaude
@@ -334,17 +425,24 @@ function Invoke-ClaudeUpdate($State, [string]$Why) {
         }
         if (-not $installed) {
             $State.lastResult = 'install-failed'
-            & $script:Deps.Toast ((Heb 'עדכון Claude נכשל')) ((Heb 'Windows לא התקין את העדכון. Claude נפתח בגרסה הקיימת. פרטים ב-watcher.log.'))
+            Write-UpdateProgress $prog 'open'
             & $script:Deps.StartProfiles $profiles
+            Write-UpdateProgress $prog 'open' $null 'failed' ((Heb 'Windows לא התקין את העדכון. Claude נפתח בגרסה הקיימת.'))
+            & $script:Deps.Toast ((Heb 'עדכון Claude נכשל')) ((Heb 'Windows לא התקין את העדכון. Claude נפתח בגרסה הקיימת. פרטים ב-watcher.log.'))
             return $false
         }
+        Write-UpdateProgress $prog 'rtl'
         $repair = & $script:Deps.RunRepair
         Write-WLog "Repair task: $($repair.Result) $($repair.Message)"
+        Write-UpdateProgress $prog 'open'
         & $script:Deps.StartProfiles $profiles
         if ($repair.Result -in @('ok', 'already')) {
+            Write-UpdateProgress $prog 'open' $null 'done' ((Heb 'Claude עודכן לגרסה ') + $label + (Heb ' ונפתח עם RTL.'))
+            $State.stageSecs = Update-StageEstimates $prog.est $prog.measured
             & $script:Deps.Toast ((Heb 'Claude עודכן')) ((Heb 'גרסה ') + $label + (Heb ' מותקנת, וה-RTL הוחל מחדש.'))
             $State.lastResult = 'ok'
         } else {
+            Write-UpdateProgress $prog 'open' $null 'failed' ((Heb 'Claude עודכן, אבל ה-RTL לא הוחל. אפשר להריץ את קיצור הדרך Update Claude RTL.'))
             & $script:Deps.Toast ((Heb 'Claude עודכן, ה-RTL לא הוחל')) ((Heb 'תוצאת התיקון: ') + $repair.Result + (Heb '. אפשר להריץ את קיצור הדרך Update Claude RTL.'))
             $State.lastResult = "repair-$($repair.Result)"
         }

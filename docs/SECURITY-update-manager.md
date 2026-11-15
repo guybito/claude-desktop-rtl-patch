@@ -11,6 +11,7 @@ none of it can be steered by a process running as the signed-in user.
 |---|---|---|
 | `watcher.ps1` (task `ClaudeRtlPatchWatcher`) | signed-in user, **not elevated** | release feed, Claude processes, transcripts, the prompt's answer |
 | `update-prompt.ps1` | signed-in user | the user's click |
+| `update-progress.ps1` | signed-in user | `update-progress.json` in LocalAppData, shown as text only |
 | `repair.ps1` (task `ClaudeRtlPatchRepair`) | **SYSTEM** | **none** |
 | `update.ps1` (shortcut) | user, then elevated through one UAC prompt | none (`-Refresh -Force` is fixed) |
 

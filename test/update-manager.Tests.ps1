@@ -72,6 +72,7 @@ Describe 'watcher.ps1 - update manager end to end (simulated)' {
     $script:UserState = Join-Path $tmp 'update-manager.json'
     $script:ChoiceFile = Join-Path $tmp 'update-choice.json'
     $script:LogFile = Join-Path $tmp 'watcher.log'
+    $script:ProgressFile = Join-Path $tmp 'update-progress.json'
 
     $url = 'https://downloads.claude.ai/releases/win32/x64/5.20000.1/Claude-b1edc63367ca6fb5fa8d5a72604951a71b37dd58.msix'
     function Reset-World {
@@ -92,7 +93,12 @@ Describe 'watcher.ps1 - update manager end to end (simulated)' {
         $script:Deps.ShowPrompt = { param($n, $c) $script:Log.Add("prompt $n $c") }
         $script:Deps.Toast = { param($t, $b) $script:Log.Add("toast $t") }
         $script:Deps.StopClaude = { $script:Log.Add('stop') }
-        $script:Deps.AddPackage = { param($u) if ($script:AddFails -gt 0) { $script:AddFails--; throw 'apps need to be closed' }; $script:Log.Add("add $u"); $script:Installed = [version]'5.20000.1.0' }
+        $script:Deps.AddPackage = { param($u, $onProgress)
+            if ($script:AddFails -gt 0) { $script:AddFails--; throw 'apps need to be closed' }
+            if ($onProgress) { & $onProgress 40; $script:MidInstall = Get-Content $script:ProgressFile -Raw | ConvertFrom-Json }
+            $script:Log.Add("add $u"); $script:Installed = [version]'5.20000.1.0' }
+        $script:Deps.ShowProgress = { param($v) $script:Log.Add("progress $v") }
+        $script:MidInstall = $null
         $script:Deps.RunRepair = { $script:Log.Add('repair'); @{ Result = $script:RepairResult; Message = '' } }
         $script:Deps.StartProfiles = { param($p) $script:Log.Add('start ' + (@($p) -join '|')) }
         $script:Deps.StuckSignal = { $script:Stuck }
@@ -214,6 +220,48 @@ Describe 'watcher.ps1 - update manager end to end (simulated)' {
         ($script:Log | Where-Object { $_ -eq 'repair' }).Count | Should Be 0
     }
 
+    It 'shows the progress window and reports each stage to it' {
+        Reset-World
+        $s = Invoke-ManagerTick (New-State)
+        Set-Choice 'now'
+        $s = Invoke-ManagerTick $s
+        $script:Log[1] | Should Be 'progress 5.20000.1'       # window opens before Claude closes
+        $script:Log[2] | Should Be 'stop'
+        $script:MidInstall.stages[$script:MidInstall.stageIndex].name | Should Be 'install'
+        $script:MidInstall.stagePercent | Should Be 40
+        $script:MidInstall.status | Should Be 'running'
+        $script:MidInstall.pid | Should Be $PID
+        $end = Get-Content $script:ProgressFile -Raw | ConvertFrom-Json
+        $end.status | Should Be 'done'
+        $end.stages[$end.stageIndex].name | Should Be 'open'
+        Test-Path "$script:ProgressFile.tmp" | Should Be $false
+    }
+
+    It 'learns stage times from a finished update and keeps them across restarts' {
+        Reset-World
+        $s = Invoke-ManagerTick (New-State)
+        Set-Choice 'now'
+        $s = Invoke-ManagerTick $s
+        $s.stageSecs.install | Should Be 75                    # (150 + ~0) / 2
+        Save-ManagerState $s
+        $est = Get-StageEstimates (Read-ManagerState)
+        $est.install | Should Be 75
+        $est.close | Should Be 5
+        (Get-StageEstimates @{ stageSecs = $null }).install | Should Be 150
+        (Get-StageEstimates @{ stageSecs = @{ install = 99999 } }).install | Should Be 1800
+        Remove-Item $script:UserState
+    }
+
+    It 'marks the progress as failed when Windows refuses the install' {
+        Reset-World
+        $s = Invoke-ManagerTick (New-State)
+        Set-Choice 'now'
+        $script:AddFails = 2
+        $s = Invoke-ManagerTick $s
+        (Get-Content $script:ProgressFile -Raw | ConvertFrom-Json).status | Should Be 'failed'
+        $s.stageSecs | Should BeNullOrEmpty                    # a failed run teaches nothing
+    }
+
     It 'reports a failed RTL repair but still reopens Claude' {
         Reset-World
         $s = Invoke-ManagerTick (New-State)
@@ -274,6 +322,51 @@ Describe 'update-prompt.ps1 - choices' {
         (New-Choice 'at' $n ([datetime]'2026-11-14T02:00')).at | Should Match '^2026-11-14T02:00'
         (New-Choice 'snooze' $n $null).snoozeUntil | Should Match '^2026-11-14T09:00'
         (New-Choice 'idle' $n $null).version | Should Be '5.20000.1'
+    }
+}
+
+Describe 'update-progress.ps1 - what the window shows' {
+    . (Join-Path $src 'update-progress.ps1')
+    $t0 = [datetime]'2026-11-15T12:00:00'
+    function P($Index, [int]$AgoSec, $Pct = $null, $Status = 'running') {
+        [pscustomobject]@{ status = $Status; stageIndex = $Index; stagePercent = $Pct
+            stageStart = $t0.AddSeconds(-$AgoSec).ToString('o')
+            stages = @([pscustomobject]@{ name = 'close'; est = 10 }, [pscustomobject]@{ name = 'install'; est = 150 },
+                       [pscustomobject]@{ name = 'rtl'; est = 90 }, [pscustomobject]@{ name = 'open'; est = 20 }) }
+    }
+    It 'starts at 0% with the whole estimate left' {
+        $v = Get-ProgressView (P 0 0) $t0
+        $v.Percent | Should Be 0; $v.SecondsLeft | Should Be 270; $v.Step | Should Be 1; $v.Steps | Should Be 4
+    }
+    It 'moves with time inside a stage but never past it' {
+        (Get-ProgressView (P 2 45) $t0).Percent | Should Be 76       # (160 + 45) / 270
+        $late = Get-ProgressView (P 2 900) $t0
+        $late.Percent | Should Be 91                                  # capped at 95% of the stage
+        $late.SecondsLeft | Should Be 25                              # 5 s floor + the open stage
+    }
+    It 'uses the real install percent once Windows reports at least 5%' {
+        $v = Get-ProgressView (P 1 60 50) $t0
+        $v.Percent | Should Be 31                                     # (10 + 75) / 270
+        $v.SecondsLeft | Should Be 170                                # 60 more s + 110 for the rest
+        (Get-ProgressView (P 1 60 2) $t0).SecondsLeft | Should Be 200 # below 5%: time-based
+    }
+    It 'shows 100% when the update ended, either way' {
+        (Get-ProgressView (P 3 1 $null 'done') $t0).Percent | Should Be 100
+        (Get-ProgressView (P 1 1 $null 'failed') $t0).SecondsLeft | Should Be 0
+    }
+    It 'words the time left' {
+        Format-TimeLeft 8 | Should Be (Heb 'Claude ייפתח בעוד כמה שניות')
+        Format-TimeLeft 45 | Should Be (Heb 'Claude ייפתח בעוד פחות מדקה')
+        Format-TimeLeft 60 | Should Be (Heb 'Claude ייפתח בעוד כדקה')
+        Format-TimeLeft 170 | Should Be ((Heb 'Claude ייפתח בעוד כ-') + '3' + (Heb ' דקות'))
+    }
+}
+
+Describe 'watcher.ps1 - real Add-AppxPackage wrapper' {
+    . (Join-Path $src 'watcher.ps1')
+    It 'throws when the package cannot be installed, so the retry logic sees it' {
+        $missing = Join-Path $env:TEMP ("no-such-" + [guid]::NewGuid().ToString('N') + '.msix')
+        { Add-PackageWithProgress $missing { } } | Should Throw
     }
 }
 

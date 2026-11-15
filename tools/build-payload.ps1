@@ -124,7 +124,7 @@ function ConvertTo-EscapedComponent([string]$name, [string]$text) {
     return $out.TrimEnd("`n")
 }
 
-foreach ($name in @('watcher', 'repair', 'update-prompt')) {
+foreach ($name in @('watcher', 'repair', 'update-prompt', 'update-progress')) {
     $srcPath = Join-Path $repoRoot "src\components\$name.ps1"
     if (-not (Test-Path $srcPath)) { Write-Host "Missing: $srcPath" -ForegroundColor Red; exit 1 }
     $comp = ConvertTo-EscapedComponent $name (Read-Lf $srcPath)
